@@ -41,11 +41,10 @@ def _final_event(thread_id: str, values: dict) -> dict:
         return {"thread_id": thread_id, "reply": interrupts[0].value, "done": False}
     return {
         "thread_id": thread_id,
-        "reply": f"Thank you! Your plugin is being built and will be delivered to {values.get('email', '')}.",
+        "reply": values.get("build_message") or "Done.",
         "done": True,
         "description": values.get("description", ""),
         "email": values.get("email", ""),
-        "build_url": values.get("build_url", ""),
     }
 
 

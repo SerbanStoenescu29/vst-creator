@@ -4,7 +4,8 @@ Flow:
     collect    -> the user describes what they want
     assistant  -> the model answers in JSON; a conditional edge reads "action":
                   reply    -> back to collect (clarify / ask again)
-                  continue -> fetch_sample -> write_code -> save_files -> build_plugin -> END
+                  continue -> fetch_sample -> write_code -> save_files -> build_plugin -> wait_for_build -> END (success)
+                  wait_for_build failed -> write_code again, with the build errors
 
 Run it two ways:
 
@@ -23,6 +24,7 @@ except ImportError:
 
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -36,7 +38,7 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 from langsmith import traceable
 
-from github_build import trigger_build
+from github_build import trigger_build, wait_for_build as poll_build
 from sample_code import fetch_sample_code
 
 # Load .env at import time: LangGraph Studio imports this file and never calls main().
@@ -91,7 +93,7 @@ And the following description:
 
 {description}
 
-Generate a VST3 plugin with C++ and Juce.
+{previous_attempt}Generate a VST3 plugin with C++ and Juce.
 
 Rules:
  - do not change the CMakeLists.txt file and do not generate a new one.
@@ -117,6 +119,10 @@ class VSTInfo(TypedDict, total=False):
     output_dir: str  # project folder (CMakeLists.txt + Source/) the sources were saved to
     build_branch: str  # GitHub branch the project was pushed to for the build
     build_url: str  # GitHub Actions page for the build workflow
+    build_status: str  # "success", "failed" or "timeout"
+    build_error: str  # compiler/CMake errors from the last failed build
+    build_attempts: int  # how many builds have been started
+    build_message: str  # final message shown to the user
     answer: str  # what to show the user when action == "reply"
 
 
@@ -210,10 +216,20 @@ def _parse_json_object(raw: str) -> dict:
 def write_code(state: VSTInfo) -> dict:
     """Ask the model to write the plugin sources from the samples and the description."""
     get_stream_writer()({"status": "Writing code"})
-    values = {**state["sample_code"], "description": state["description"]}
-    prompt = WRITE_CODE_PROMPT
-    for key, value in values.items():  # str.replace: the prompt contains literal braces
-        prompt = prompt.replace("{" + key + "}", value)
+    previous_attempt = ""
+    if state.get("build_error"):
+        previous = state["generated_code"]
+        files = "\n\n".join(f"{OUTPUT_FILES[k]}:\n{previous[k]}" for k in OUTPUT_FILES)
+        previous_attempt = (
+            "A previous attempt generated the following files:\n\n"
+            f"{files}\n\n"
+            "That attempt failed to build with the following errors:\n\n"
+            f"{state['build_error']}\n\n"
+            "Fix these errors. Return the complete corrected files.\n\n"
+        )
+    values = {**state["sample_code"], "description": state["description"], "previous_attempt": previous_attempt}
+    # One pass, so braces inside the substituted text are never treated as placeholders.
+    prompt = re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), WRITE_CODE_PROMPT)
     raw = call_openai(
         [
             {"role": "system", "content": prompt},
@@ -252,7 +268,52 @@ def build_plugin(state: VSTInfo) -> dict:
     get_stream_writer()({"status": "Building plugin"})
     branch = f"build/{Path(state['output_dir']).name}"
     url = trigger_build(state["output_dir"], branch)
-    return {"build_branch": branch, "build_url": url}
+    return {
+        "build_branch": branch,
+        "build_url": url,
+        "build_attempts": state.get("build_attempts", 0) + 1,
+    }
+
+
+BUILD_TIMEOUT_MINUTES = 20
+MAX_BUILD_ATTEMPTS = int(os.getenv("MAX_BUILD_ATTEMPTS", "3"))
+
+
+def wait_for_build(state: VSTInfo) -> dict:
+    """Wait (up to 20 minutes) for the GitHub Actions build and record the outcome."""
+    writer = get_stream_writer()
+    writer({"status": "Waiting for build"})
+    result = poll_build(
+        state["build_branch"],
+        BUILD_TIMEOUT_MINUTES * 60,
+        on_wait=lambda secs: writer({"status": f"Waiting for build ({secs // 60} min)"}),
+    )
+    update = {"build_status": result["status"], "build_url": result["url"] or state["build_url"]}
+    if result["status"] == "success":
+        update["build_error"] = ""
+        update["build_message"] = (
+            "Build succeeded! Your VST3 plugin was built. "
+            f"Download it from the Artifacts section of {result['url']}"
+        )
+    else:
+        update["build_error"] = result["error"]
+    return update
+
+
+def route_after_build(state: VSTInfo) -> str:
+    if state["build_status"] == "success":
+        return "done"
+    if state["build_status"] == "failed" and state["build_attempts"] < MAX_BUILD_ATTEMPTS:
+        return "retry"
+    return "give_up"
+
+
+def give_up(state: VSTInfo) -> dict:
+    if state["build_status"] == "timeout":
+        why = f"The build did not finish within {BUILD_TIMEOUT_MINUTES} minutes."
+    else:
+        why = f"The build still failed after {state['build_attempts']} attempts.\n\n{state['build_error']}"
+    return {"build_message": f"{why}\n\nDetails: {state['build_url']}"}
 
 
 def route_after_assistant(state: VSTInfo) -> str:
@@ -271,6 +332,8 @@ def build_graph(checkpointer=None):
     builder.add_node("write_code", write_code)
     builder.add_node("save_files", save_files)
     builder.add_node("build_plugin", build_plugin)
+    builder.add_node("wait_for_build", wait_for_build)
+    builder.add_node("give_up", give_up)
     builder.add_edge(START, "collect")
     builder.add_edge("collect", "assistant")
     builder.add_conditional_edges(
@@ -281,7 +344,13 @@ def build_graph(checkpointer=None):
     builder.add_edge("fetch_sample", "write_code")
     builder.add_edge("write_code", "save_files")
     builder.add_edge("save_files", "build_plugin")
-    builder.add_edge("build_plugin", END)
+    builder.add_edge("build_plugin", "wait_for_build")
+    builder.add_conditional_edges(
+        "wait_for_build",
+        route_after_build,
+        {"done": END, "retry": "write_code", "give_up": "give_up"},
+    )
+    builder.add_edge("give_up", END)
     return builder.compile(checkpointer=checkpointer)
 
 

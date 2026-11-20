@@ -1,6 +1,8 @@
 """Push a generated plugin project to a GitHub branch and trigger the VST3 build workflow."""
 
 import os
+import re
+import time
 from pathlib import Path
 
 import httpx
@@ -57,3 +59,64 @@ def trigger_build(project_dir: str, branch: str) -> str:
         {"ref": workflow_ref, "inputs": {"branch": branch}},
     )
     return f"https://github.com/{repo}/actions/workflows/{workflow}"
+
+
+POLL_SECONDS = int(os.getenv("BUILD_POLL_SECONDS", "15"))
+
+
+def _get(url: str, **kwargs) -> httpx.Response:
+    response = httpx.get(url, headers=_headers(), timeout=60, follow_redirects=True, **kwargs)
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub {url} -> {response.status_code}: {response.text[:300]}")
+    return response
+
+
+def _find_run(repo: str, workflow: str, branch: str) -> dict | None:
+    """The run started for `branch` is the one whose run-name is 'Build <branch>'."""
+    runs = _get(
+        f"{API}/repos/{repo}/actions/workflows/{workflow}/runs",
+        params={"event": "workflow_dispatch", "per_page": 30},
+    ).json()["workflow_runs"]
+    return next((r for r in runs if r.get("display_title") == f"Build {branch}"), None)
+
+
+def _error_excerpt(repo: str, run_id: int, max_lines: int = 60) -> str:
+    """Pull the compiler/CMake error lines out of the failed job's log."""
+    jobs = _get(f"{API}/repos/{repo}/actions/runs/{run_id}/jobs").json()["jobs"]
+    lines = []
+    for job in jobs:
+        if job.get("conclusion") != "failure":
+            continue
+        log = _get(f"{API}/repos/{repo}/actions/jobs/{job['id']}/logs").text
+        for line in log.splitlines():
+            line = line.split("Z ", 1)[1] if line[:4].isdigit() and "Z " in line[:40] else line
+            if re.search(r"error|fatal|failed", line, re.I) and line not in lines:
+                lines.append(line.strip())
+        if not lines:  # no recognisable error lines: fall back to the end of the log
+            lines = [l.strip() for l in log.splitlines()[-max_lines:]]
+    return "\n".join(lines[:max_lines]) or "The build failed, but no log output could be read."
+
+
+def wait_for_build(branch: str, timeout_seconds: int = 20 * 60, on_wait=None) -> dict:
+    """Poll until the workflow run for `branch` finishes or the timeout passes.
+
+    Returns {"status": "success" | "failed" | "timeout", "url": ..., "error": ...}.
+    """
+    repo = os.getenv("GITHUB_REPO", "SerbanStoenescu29/vst-creator")
+    workflow = os.getenv("GITHUB_BUILD_WORKFLOW", "build-vst.yml")
+    started = time.monotonic()
+    run = None
+    while time.monotonic() - started < timeout_seconds:
+        run = _find_run(repo, workflow, branch)
+        if run and run["status"] == "completed":
+            if run["conclusion"] == "success":
+                return {"status": "success", "url": run["html_url"], "error": ""}
+            return {"status": "failed", "url": run["html_url"], "error": _error_excerpt(repo, run["id"])}
+        if on_wait:
+            on_wait(int(time.monotonic() - started))
+        time.sleep(POLL_SECONDS)
+    return {
+        "status": "timeout",
+        "url": run["html_url"] if run else "",
+        "error": f"The build did not finish within {timeout_seconds // 60} minutes.",
+    }

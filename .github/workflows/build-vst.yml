@@ -1,4 +1,5 @@
 name: Build VST3
+run-name: Build ${{ inputs.branch }}
 
 # Triggered by the vst-creator app after it pushes generated sources to a branch.
 on:
