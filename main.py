@@ -4,7 +4,7 @@ Flow:
     collect    -> the user describes what they want
     assistant  -> the model answers in JSON; a conditional edge reads "action":
                   reply    -> back to collect (clarify / ask again)
-                  continue -> fetch_sample -> write_code -> save_files -> END
+                  continue -> fetch_sample -> write_code -> save_files -> build_plugin -> END
 
 Run it two ways:
 
@@ -35,6 +35,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from langsmith import traceable
 
+from github_build import trigger_build
 from sample_code import fetch_sample_code
 
 # Load .env at import time: LangGraph Studio imports this file and never calls main().
@@ -112,7 +113,9 @@ class VSTInfo(TypedDict, total=False):
     action: str  # "reply" or "continue", from the model's JSON
     sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
     generated_code: dict  # {plugin_editor_h, plugin_editor_cpp, plugin_processor_h, plugin_processor_cpp}
-    output_dir: str  # folder the generated sources were saved to
+    output_dir: str  # project folder (CMakeLists.txt + Source/) the sources were saved to
+    build_branch: str  # GitHub branch the project was pushed to for the build
+    build_url: str  # GitHub Actions page for the build workflow
     answer: str  # what to show the user when action == "reply"
 
 
@@ -220,7 +223,7 @@ def write_code(state: VSTInfo) -> dict:
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 
-# generated_code key -> file name written under <run folder>/Source/
+# generated_code key -> file name written under <run folder>/Source/ (CMakeLists.txt goes in the run folder)
 OUTPUT_FILES = {
     "plugin_editor_h": "PluginEditor.h",
     "plugin_editor_cpp": "PluginEditor.cpp",
@@ -230,12 +233,21 @@ OUTPUT_FILES = {
 
 
 def save_files(state: VSTInfo) -> dict:
-    """Write the four generated source files to disk, in a new folder per run."""
-    source_dir = OUTPUT_DIR / uuid.uuid4().hex / "Source"
+    """Write the project (CMakeLists.txt + the four generated sources) to a new folder per run."""
+    project_dir = OUTPUT_DIR / uuid.uuid4().hex
+    source_dir = project_dir / "Source"
     source_dir.mkdir(parents=True)
+    (project_dir / "CMakeLists.txt").write_text(state["sample_code"]["cmake_lists"], encoding="utf-8")
     for key, filename in OUTPUT_FILES.items():
         (source_dir / filename).write_text(state["generated_code"][key], encoding="utf-8")
-    return {"output_dir": str(source_dir)}
+    return {"output_dir": str(project_dir)}
+
+
+def build_plugin(state: VSTInfo) -> dict:
+    """Push the project to a GitHub branch and trigger the Visual Studio build workflow."""
+    branch = f"build/{Path(state['output_dir']).name}"
+    url = trigger_build(state["output_dir"], branch)
+    return {"build_branch": branch, "build_url": url}
 
 
 def route_after_assistant(state: VSTInfo) -> str:
@@ -253,6 +265,7 @@ def build_graph(checkpointer=None):
     builder.add_node("fetch_sample", fetch_sample)
     builder.add_node("write_code", write_code)
     builder.add_node("save_files", save_files)
+    builder.add_node("build_plugin", build_plugin)
     builder.add_edge(START, "collect")
     builder.add_edge("collect", "assistant")
     builder.add_conditional_edges(
@@ -262,7 +275,8 @@ def build_graph(checkpointer=None):
     )
     builder.add_edge("fetch_sample", "write_code")
     builder.add_edge("write_code", "save_files")
-    builder.add_edge("save_files", END)
+    builder.add_edge("save_files", "build_plugin")
+    builder.add_edge("build_plugin", END)
     return builder.compile(checkpointer=checkpointer)
 
 
