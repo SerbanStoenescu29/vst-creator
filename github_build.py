@@ -28,9 +28,10 @@ def _post(url: str, payload: dict) -> httpx.Response:
     return response
 
 
-def trigger_build(project_dir: str, branch: str) -> str:
+def trigger_build(project_dir: str, branch: str, email: str = "") -> str:
     """Commit every file under project_dir to a new parentless branch `branch`
-    of GITHUB_REPO, then dispatch the build-vst.yml workflow against it.
+    of GITHUB_REPO, then dispatch the build-vst.yml workflow against it. When the build
+    succeeds, the workflow e-mails the plugin to `email` (if given).
     Returns the Actions page URL."""
     repo = os.getenv("GITHUB_REPO", "SerbanStoenescu29/vst-creator")
     workflow = os.getenv("GITHUB_BUILD_WORKFLOW", "build-vst.yml")
@@ -56,7 +57,7 @@ def trigger_build(project_dir: str, branch: str) -> str:
 
     _post(
         f"{API}/repos/{repo}/actions/workflows/{workflow}/dispatches",
-        {"ref": workflow_ref, "inputs": {"branch": branch}},
+        {"ref": workflow_ref, "inputs": {"branch": branch, "email": email}},
     )
     return f"https://github.com/{repo}/actions/workflows/{workflow}"
 

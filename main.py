@@ -195,7 +195,7 @@ def assistant(state: VSTInfo) -> dict:
             "messages": messages,
             "action": "continue",
             "description": data.get("full_description", ""),
-            "email": data.get("email", ""),
+            "email": data.get("email", ""), #TODO: validate e-mail?
         }
     return {"messages": messages, "action": "reply", "answer": str(data.get("answer", ""))}
 
@@ -215,7 +215,10 @@ def _parse_json_object(raw: str) -> dict:
 
 def write_code(state: VSTInfo) -> dict:
     """Ask the model to write the plugin sources from the samples and the description."""
-    get_stream_writer()({"status": "Writing code"})
+    if state.get("build_error"):
+        get_stream_writer()({"status": "Build failed - fixing the code"})
+    else:
+        get_stream_writer()({"status": "Writing code"})
     previous_attempt = ""
     if state.get("build_error"):
         previous = state["generated_code"]
@@ -267,7 +270,7 @@ def build_plugin(state: VSTInfo) -> dict:
     """Push the project to a GitHub branch and trigger the Visual Studio build workflow."""
     get_stream_writer()({"status": "Building plugin"})
     branch = f"build/{Path(state['output_dir']).name}"
-    url = trigger_build(state["output_dir"], branch)
+    url = trigger_build(state["output_dir"], branch, state.get("email", ""))
     return {
         "build_branch": branch,
         "build_url": url,
@@ -282,18 +285,20 @@ MAX_BUILD_ATTEMPTS = int(os.getenv("MAX_BUILD_ATTEMPTS", "3"))
 def wait_for_build(state: VSTInfo) -> dict:
     """Wait (up to 20 minutes) for the GitHub Actions build and record the outcome."""
     writer = get_stream_writer()
-    writer({"status": "Waiting for build"})
+    attempt = f"attempt {state['build_attempts']}/{MAX_BUILD_ATTEMPTS}"
+    writer({"status": f"Waiting for build ({attempt})"})
     result = poll_build(
         state["build_branch"],
         BUILD_TIMEOUT_MINUTES * 60,
-        on_wait=lambda secs: writer({"status": f"Waiting for build ({secs // 60} min)"}),
+        on_wait=lambda secs: writer({"status": f"Waiting for build ({attempt}, {secs // 60} min)"}),
     )
     update = {"build_status": result["status"], "build_url": result["url"] or state["build_url"]}
     if result["status"] == "success":
         update["build_error"] = ""
         update["build_message"] = (
-            "Build succeeded! Your VST3 plugin was built. "
-            f"Download it from the Artifacts section of {result['url']}"
+            "Build succeeded! Your VST3 plugin was built"
+            + (f" and is being e-mailed to {state['email']}" if state.get("email") else "")
+            + f". You can also download it from the Artifacts section of {result['url']}"
         )
     else:
         update["build_error"] = result["error"]
