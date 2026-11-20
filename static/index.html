@@ -70,11 +70,28 @@ async function call(message) {
       body: JSON.stringify({ thread_id: threadId, message }),
     });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-    const d = await r.json();
-    threadId = d.thread_id;
-    done = d.done;
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "", final = null;
+    const handle = line => {
+      if (!line.trim()) return;
+      const ev = JSON.parse(line);
+      if (ev.status) { t.textContent = ev.status + "…"; log.scrollTop = log.scrollHeight; }
+      else if (ev.error) throw new Error(ev.error);
+      else if (ev.final) final = ev.final;
+    };
+    for (;;) {
+      const { value, done: eof } = await reader.read();
+      if (eof) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n"); buf = lines.pop();
+      lines.forEach(handle);
+    }
+    handle(buf);
+    if (!final) throw new Error("No response");
+    threadId = final.thread_id;
+    done = final.done;
     t.classList.remove("typing");
-    t.textContent = d.reply;
+    t.textContent = final.reply + (final.build_url ? "\n\nBuild: " + final.build_url : "");
   } catch (e) {
     t.classList.remove("typing");
     t.textContent = "Error: " + e.message;

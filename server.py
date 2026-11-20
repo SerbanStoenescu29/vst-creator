@@ -1,11 +1,12 @@
 """Web server for the VST3 chat: FastAPI + a static ChatGPT-style page."""
 
+import json
 import threading
 import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
@@ -34,30 +35,48 @@ def _lock_for(thread_id: str) -> threading.Lock:
         return _locks.setdefault(thread_id, threading.Lock())
 
 
-@app.post("/api/chat")
-def chat(body: ChatIn):
-    thread_id = body.thread_id or uuid.uuid4().hex
-    config = {"configurable": {"thread_id": thread_id}}
-    with _lock_for(thread_id):
-        if body.message is None:
-            result = app_graph.invoke({"messages": []}, config)
-        else:
-            if not body.message.strip():
-                raise HTTPException(400, "Empty message")
-            if not app_graph.get_state(config).next:
-                raise HTTPException(409, "Conversation not active or already finished")
-            result = app_graph.invoke(Command(resume=body.message), config)
-
-    interrupts = result.get("__interrupt__")
+def _final_event(thread_id: str, values: dict) -> dict:
+    interrupts = values.get("__interrupt__")
     if interrupts:
         return {"thread_id": thread_id, "reply": interrupts[0].value, "done": False}
     return {
         "thread_id": thread_id,
-        "reply": f"Thank you! Your plugin will be delivered to {result.get('email', '')}.",
+        "reply": f"Thank you! Your plugin is being built and will be delivered to {values.get('email', '')}.",
         "done": True,
-        "description": result.get("description", ""),
-        "email": result.get("email", ""),
+        "description": values.get("description", ""),
+        "email": values.get("email", ""),
+        "build_url": values.get("build_url", ""),
     }
+
+
+@app.post("/api/chat")
+def chat(body: ChatIn):
+    """Streams newline-delimited JSON: {"status": ...} while nodes run, then {"final": ...}."""
+    thread_id = body.thread_id or uuid.uuid4().hex
+    config = {"configurable": {"thread_id": thread_id}}
+    if body.message is None:
+        graph_input = {"messages": []}
+    else:
+        if not body.message.strip():
+            raise HTTPException(400, "Empty message")
+        if not app_graph.get_state(config).next:
+            raise HTTPException(409, "Conversation not active or already finished")
+        graph_input = Command(resume=body.message)
+
+    def events():
+        with _lock_for(thread_id):
+            last = {}
+            try:
+                for mode, chunk in app_graph.stream(graph_input, config, stream_mode=["custom", "values"]):
+                    if mode == "custom":
+                        yield json.dumps(chunk) + "\n"
+                    else:
+                        last = chunk
+                yield json.dumps({"final": _final_event(thread_id, last)}) + "\n"
+            except Exception as e:  # surface failures to the page instead of cutting the stream
+                yield json.dumps({"error": f"{type(e).__name__}: {e}"}) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @app.get("/healthz")

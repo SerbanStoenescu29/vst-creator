@@ -32,6 +32,7 @@ import httpx
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 from langsmith import traceable
 
@@ -195,6 +196,7 @@ def assistant(state: VSTInfo) -> dict:
 
 def fetch_sample(state: VSTInfo) -> dict:
     """Download the sample plugin sources and keep them in the state."""
+    get_stream_writer()({"status": "Fetching sample"})
     return {"sample_code": fetch_sample_code()}
 
 
@@ -207,6 +209,7 @@ def _parse_json_object(raw: str) -> dict:
 
 def write_code(state: VSTInfo) -> dict:
     """Ask the model to write the plugin sources from the samples and the description."""
+    get_stream_writer()({"status": "Writing code"})
     values = {**state["sample_code"], "description": state["description"]}
     prompt = WRITE_CODE_PROMPT
     for key, value in values.items():  # str.replace: the prompt contains literal braces
@@ -234,6 +237,7 @@ OUTPUT_FILES = {
 
 def save_files(state: VSTInfo) -> dict:
     """Write the project (CMakeLists.txt + the four generated sources) to a new folder per run."""
+    get_stream_writer()({"status": "Saving files"})
     project_dir = OUTPUT_DIR / uuid.uuid4().hex
     source_dir = project_dir / "Source"
     source_dir.mkdir(parents=True)
@@ -245,6 +249,7 @@ def save_files(state: VSTInfo) -> dict:
 
 def build_plugin(state: VSTInfo) -> dict:
     """Push the project to a GitHub branch and trigger the Visual Studio build workflow."""
+    get_stream_writer()({"status": "Building plugin"})
     branch = f"build/{Path(state['output_dir']).name}"
     url = trigger_build(state["output_dir"], branch)
     return {"build_branch": branch, "build_url": url}
