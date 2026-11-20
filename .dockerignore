@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+.langgraph_api
+__pycache__
+*.bak
+*.log
+*.txt
+!requirements.txt

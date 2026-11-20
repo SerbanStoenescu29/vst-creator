@@ -87,3 +87,13 @@ the way. To skip the scripts entirely:
 - **Don't edit code by hand.** Anything you want changed, ask for it.
 - **When it breaks,** paste the error into Claude Code and say "this failed,
   fix it and run it again." That loop is the skill.
+
+## Web app / Docker (EC2)
+
+1. On the EC2 instance install Docker (`sudo dnf install -y docker docker-compose-plugin && sudo systemctl enable --now docker` on Amazon Linux 2023).
+2. Clone the repo and create `.env` with `OPENAI_API_KEY=...` (optionally `OPENAI_MODEL`, `LANGSMITH_*`).
+3. `docker compose up -d --build`
+4. Open port 80 in the instance's security group and browse to `http://<ec2-public-ip>/`.
+
+Local run: `pip install -r requirements.txt && uvicorn server:app --port 8000`.
+Conversations are held in memory (single worker); a restart clears them.

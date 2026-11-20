@@ -1,14 +1,9 @@
 langgraph>=1.0
 python-dotenv>=1.0
 httpx>=0.27
-streamlit>=1.38
-
-# session 4 - Studio and observability
 langsmith>=0.4
-langgraph-cli[inmem]>=0.2
+fastapi>=0.110
+uvicorn[standard]>=0.29
 
 # corporate networks that inspect TLS - use the OS certificate store
 truststore>=0.9
-
-# Windows: langgraph dev needs this for colored logs
-colorama>=0.4
