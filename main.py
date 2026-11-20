@@ -4,7 +4,7 @@ Flow:
     collect    -> the user describes what they want
     assistant  -> the model answers in JSON; a conditional edge reads "action":
                   reply    -> back to collect (clarify / ask again)
-                  continue -> END (full_description and e-mail captured)
+                  continue -> fetch_sample -> write_code -> save_files -> END
 
 Run it two ways:
 
@@ -24,6 +24,8 @@ except ImportError:
 import json
 import os
 import sys
+import uuid
+from pathlib import Path
 from typing import TypedDict
 
 import httpx
@@ -32,6 +34,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from langsmith import traceable
+
+from sample_code import fetch_sample_code
 
 # Load .env at import time: LangGraph Studio imports this file and never calls main().
 load_dotenv()
@@ -64,11 +68,51 @@ When the user confirms that everything is correct and complete, ask for an e-mai
 """
 
 
+WRITE_CODE_PROMPT = """You are a VST3 plugin generator for Windows.
+Given the following sample files:
+CMakeLists.txt:
+{cmake_lists}
+
+PluginEditor.h:
+{plugin_editor_h}
+
+PluginEditor.cpp:
+{plugin_editor_cpp}
+
+PluginProcessor.h:
+{plugin_processor_h}
+
+PluginProcessor.cpp:
+{plugin_processor_cpp}
+
+And the following description:
+
+{description}
+
+Generate a VST3 plugin with C++ and Juce.
+
+Rules:
+ - do not change the CMakeLists.txt file and do not generate a new one.
+ - do not add new dependencies
+ - make sure that all your JUCE API calls are compatible with Juce 8.0.8
+- return the output in the following JSON format:
+{
+"plugin_editor_h" : <content of PluginEditor.h>,
+"plugin_editor_cpp" : <content of PluginEditor.cpp>,
+"plugin_processor_h": <content of PluginProcessor.h,
+"plugin_processor_cpp": <content of PluginProcessor.cpp>
+}
+"""
+
+
 class VSTInfo(TypedDict, total=False):
     description: str
     email: str
     messages: list  # chat history sent to the model
     action: str  # "reply" or "continue", from the model's JSON
+    sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
+    generated_code: dict  # {plugin_editor_h, plugin_editor_cpp, plugin_processor_h, plugin_processor_cpp}
+    output_dir: str  # folder the generated sources were saved to
     answer: str  # what to show the user when action == "reply"
 
 
@@ -84,7 +128,7 @@ def _openai_llm(messages, temperature):
         url,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={"model": OPENAI_MODEL, "messages": messages, "temperature": temperature},
-        timeout=60,
+        timeout=180,
     )
     response.raise_for_status()
     data = response.json()
@@ -146,6 +190,54 @@ def assistant(state: VSTInfo) -> dict:
     return {"messages": messages, "action": "reply", "answer": str(data.get("answer", ""))}
 
 
+def fetch_sample(state: VSTInfo) -> dict:
+    """Download the sample plugin sources and keep them in the state."""
+    return {"sample_code": fetch_sample_code()}
+
+
+def _parse_json_object(raw: str) -> dict:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`").removeprefix("json").strip()
+    return json.loads(text)
+
+
+def write_code(state: VSTInfo) -> dict:
+    """Ask the model to write the plugin sources from the samples and the description."""
+    values = {**state["sample_code"], "description": state["description"]}
+    prompt = WRITE_CODE_PROMPT
+    for key, value in values.items():  # str.replace: the prompt contains literal braces
+        prompt = prompt.replace("{" + key + "}", value)
+    raw = call_openai(
+        [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "Generate the plugin now."},
+        ],
+        temperature=0.2,
+    )
+    return {"generated_code": _parse_json_object(raw)}
+
+
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+
+# generated_code key -> file name written under <run folder>/Source/
+OUTPUT_FILES = {
+    "plugin_editor_h": "PluginEditor.h",
+    "plugin_editor_cpp": "PluginEditor.cpp",
+    "plugin_processor_h": "PluginProcessor.h",
+    "plugin_processor_cpp": "PluginProcessor.cpp",
+}
+
+
+def save_files(state: VSTInfo) -> dict:
+    """Write the four generated source files to disk, in a new folder per run."""
+    source_dir = OUTPUT_DIR / uuid.uuid4().hex / "Source"
+    source_dir.mkdir(parents=True)
+    for key, filename in OUTPUT_FILES.items():
+        (source_dir / filename).write_text(state["generated_code"][key], encoding="utf-8")
+    return {"output_dir": str(source_dir)}
+
+
 def route_after_assistant(state: VSTInfo) -> str:
     return "continue" if state["action"] == "continue" else "reply"
 
@@ -158,13 +250,19 @@ def build_graph(checkpointer=None):
     builder = StateGraph(VSTInfo)
     builder.add_node("collect", collect)
     builder.add_node("assistant", assistant)
+    builder.add_node("fetch_sample", fetch_sample)
+    builder.add_node("write_code", write_code)
+    builder.add_node("save_files", save_files)
     builder.add_edge(START, "collect")
     builder.add_edge("collect", "assistant")
     builder.add_conditional_edges(
         "assistant",
         route_after_assistant,
-        {"reply": "collect", "continue": END},
+        {"reply": "collect", "continue": "fetch_sample"},
     )
+    builder.add_edge("fetch_sample", "write_code")
+    builder.add_edge("write_code", "save_files")
+    builder.add_edge("save_files", END)
     return builder.compile(checkpointer=checkpointer)
 
 

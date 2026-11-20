@@ -8,3 +8,4 @@ __pycache__/
 sl.log
 *.bak
 langsmith_cheatset.txt
+output/
