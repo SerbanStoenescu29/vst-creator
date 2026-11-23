@@ -33,6 +33,7 @@ _pending: dict[str, tuple[int, str]] = {}
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "session"
+MAX_IMAGE_CHARS = 8_000_000  # a data URL of about 6 MB
 COOKIE_SECURE = os.getenv("COOKIE_SECURE") == "1"  # set when served over HTTPS
 
 
@@ -117,6 +118,7 @@ def me(user: dict = Depends(current_user)):
 class ChatIn(BaseModel):
     thread_id: str | None = None
     message: str | None = None  # None starts a new conversation
+    image: str | None = None  # a picture as a data URL (the UI design), optional
 
 
 def _lock_for(thread_id: str) -> threading.Lock:
@@ -152,29 +154,37 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
     if body.message is None:
         graph_input = {"messages": []}
     else:
-        if not body.message.strip():
+        if body.image and not (body.image.startswith("data:image/") and len(body.image) <= MAX_IMAGE_CHARS):
+            raise HTTPException(400, "The picture must be an image under 6 MB")
+        if not body.message.strip() and not body.image:
             raise HTTPException(400, "Empty message")
         if not app_graph.get_state(config).next:
             raise HTTPException(409, "Conversation not active or already finished")
-        graph_input = Command(resume=body.message)
+        graph_input = Command(resume={"text": body.message, "image": body.image or ""})
         if pending:  # first message: the conversation is saved from here on
             chats.create_conversation(thread_id, user["id"])
             if pending[1]:
                 chats.add_message(thread_id, "assistant", pending[1])
             del _pending[thread_id]
-        chats.add_message(thread_id, "user", body.message)
+        saved = body.message + ("\n" if body.message and body.image else "") + ("[picture attached]" if body.image else "")
+        chats.add_message(thread_id, "user", saved)
         chats.set_title_from(thread_id, body.message)
 
     def events():
         with _lock_for(thread_id):
             last = {}
             try:
-                for mode, chunk in app_graph.stream(graph_input, config, stream_mode=["custom", "values"]):
+                for mode, chunk in app_graph.stream(graph_input, config, stream_mode=["custom", "values", "tasks"]):
                     if mode == "custom":
                         yield json.dumps(chunk) + "\n"
+                    elif mode == "tasks":
+                        if "input" in chunk:  # a node is starting
+                            yield json.dumps({"node": chunk["name"]}) + "\n"
                     else:
                         last = chunk
                 event = _final_event(thread_id, last)
+                waiting = app_graph.get_state(config).next
+                event["node"] = waiting[0] if waiting else "END"
                 if thread_id in _pending:
                     _pending[thread_id] = (user["id"], event["reply"])
                 else:
@@ -208,7 +218,9 @@ def conversation(thread_id: str, user: dict = Depends(current_user)):
     if not conv:
         raise HTTPException(404, "Conversation not found")
     # Still resumable only while the graph state is in memory (it is lost on a restart).
-    conv["active"] = bool(app_graph.get_state({"configurable": {"thread_id": thread_id}}).next)
+    waiting = app_graph.get_state({"configurable": {"thread_id": thread_id}}).next
+    conv["active"] = bool(waiting)
+    conv["node"] = waiting[0] if waiting else "END"
     return conv
 
 

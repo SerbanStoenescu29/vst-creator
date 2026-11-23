@@ -4,7 +4,10 @@ Flow:
     collect    -> the user describes what they want
     assistant  -> the model answers in JSON; a conditional edge reads "action":
                   reply    -> back to collect (clarify / ask again)
-                  continue -> fetch_sample -> write_code -> save_files -> build_plugin -> wait_for_build -> END (success)
+                  continue -> ask_ui: "do you have a picture of the UI?" (the model decides yes/no)
+                      no  -> fetch_sample
+                      yes -> ask_image (a picture is required) -> analyze_ui -> fetch_sample
+                  fetch_sample -> write_code -> save_files -> build_plugin -> wait_for_build -> END (success)
                   wait_for_build failed -> write_code again, with the build errors
 
 Run it two ways:
@@ -123,6 +126,8 @@ class VSTInfo(TypedDict, total=False):
     build_attempts: int  # how many builds have been started
     build_message: str  # final message shown to the user
     plugin_zip: str  # the built VST3 (zip) downloaded from the GitHub Actions artifact
+    ui_choice: str  # "yes" / "no": does the user have a picture of the UI design
+    ui_image: str  # the picture as a data URL, until it has been analysed
     answer: str  # what to show the user when action == "reply"
 
 
@@ -175,10 +180,17 @@ def parse_reply(raw: str) -> dict:
     return {"action": "reply", "answer": raw.strip()}
 
 
+def _unwrap(value) -> tuple[str, str]:
+    """A resume value is plain text (terminal) or {"text", "image"} (web page, image as a data URL)."""
+    if isinstance(value, dict):
+        return str(value.get("text") or ""), str(value.get("image") or "")
+    return str(value or ""), ""
+
+
 def collect(state: VSTInfo) -> dict:
     """Show the model's last answer (or the opening question) and read the user's reply."""
     prompt = state.get("answer") or "What would you like me to do?"
-    user_text = interrupt(prompt)
+    user_text, _ = _unwrap(interrupt(prompt))
     messages = list(state.get("messages") or [])
     messages.append({"role": "user", "content": user_text})
     return {"messages": messages}
@@ -324,6 +336,67 @@ def give_up(state: VSTInfo) -> dict:
     return {"build_message": f"{why}\n\nDetails: {state['build_url']}"}
 
 
+UI_QUESTION = "Do you have a picture of the UI design you want for the plugin? (yes or no)"
+UI_PICTURE_PROMPT = "Great! Please attach the picture of your UI design (use the paperclip button)."
+UI_PICTURE_AGAIN = "I still need the picture. Please attach it with the paperclip button."
+
+YES_NO_PROMPT = """\
+The user was asked whether they have a picture of the UI design they want for their audio plugin.
+Decide from their answer whether they said yes or no.
+Reply with exactly one lowercase word: yes or no."""
+
+ANALYZE_UI_PROMPT = """\
+You are a UI analyst for audio plugins. Describe the plugin user interface in the picture in as much detail as possible
+so that a developer can recreate it: the window size and proportions, the layout and every panel or section,
+each control (knobs, sliders, buttons, switches, meters, displays, drop-downs) with its label, position, relative size
+and likely function, the colour palette, fonts, textures and overall visual style. Answer in plain text."""
+
+
+def ask_ui(state: VSTInfo) -> dict:
+    """Ask whether the user has a picture of the UI; the model decides if the answer is yes or no."""
+    text, image = _unwrap(interrupt(UI_QUESTION))
+    if image:  # they attached the picture right away: that is a yes
+        return {"ui_choice": "yes", "ui_image": image}
+    answer = call_openai(
+        [{"role": "system", "content": YES_NO_PROMPT}, {"role": "user", "content": text}],
+        temperature=0,
+    )
+    return {"ui_choice": "yes" if answer.strip().lower().startswith("yes") else "no"}
+
+
+def route_after_ui_question(state: VSTInfo) -> str:
+    return "yes" if state["ui_choice"] == "yes" else "no"
+
+
+def ask_image(state: VSTInfo) -> dict:
+    """Require a picture: keep asking until one is attached."""
+    if state.get("ui_image"):
+        return {}
+    prompt = UI_PICTURE_PROMPT
+    while True:
+        _, image = _unwrap(interrupt(prompt))
+        if image:
+            return {"ui_image": image}
+        prompt = UI_PICTURE_AGAIN
+
+
+def analyze_ui(state: VSTInfo) -> dict:
+    """Describe the UI picture and add the description to the plugin description."""
+    get_stream_writer()({"status": "Analyzing the UI picture"})
+    analysis = call_openai(
+        [
+            {"role": "system", "content": ANALYZE_UI_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Describe this plugin UI."},
+                {"type": "image_url", "image_url": {"url": state["ui_image"]}},
+            ]},
+        ],
+        temperature=0.2,
+    ).strip()
+    description = f"{state.get('description', '')}\n\nUI design (described from the user's picture):\n{analysis}"
+    return {"description": description.strip(), "ui_image": ""}
+
+
 def route_after_assistant(state: VSTInfo) -> str:
     return "continue" if state["action"] == "continue" else "reply"
 
@@ -336,6 +409,9 @@ def build_graph(checkpointer=None):
     builder = StateGraph(VSTInfo)
     builder.add_node("collect", collect)
     builder.add_node("assistant", assistant)
+    builder.add_node("ask_ui", ask_ui)
+    builder.add_node("ask_image", ask_image)
+    builder.add_node("analyze_ui", analyze_ui)
     builder.add_node("fetch_sample", fetch_sample)
     builder.add_node("write_code", write_code)
     builder.add_node("save_files", save_files)
@@ -347,8 +423,15 @@ def build_graph(checkpointer=None):
     builder.add_conditional_edges(
         "assistant",
         route_after_assistant,
-        {"reply": "collect", "continue": "fetch_sample"},
+        {"reply": "collect", "continue": "ask_ui"},
     )
+    builder.add_conditional_edges(
+        "ask_ui",
+        route_after_ui_question,
+        {"yes": "ask_image", "no": "fetch_sample"},
+    )
+    builder.add_edge("ask_image", "analyze_ui")
+    builder.add_edge("analyze_ui", "fetch_sample")
     builder.add_edge("fetch_sample", "write_code")
     builder.add_edge("write_code", "save_files")
     builder.add_edge("save_files", "build_plugin")
