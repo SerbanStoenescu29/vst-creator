@@ -6,7 +6,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py server.py sample_code.py github_build.py ./
+COPY main.py server.py auth.py sample_code.py github_build.py ./
 COPY static ./static
 
 RUN useradd -m app

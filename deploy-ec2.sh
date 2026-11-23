@@ -63,7 +63,10 @@ if [ "$FORCE_ENV" = 1 ] || ! remote "test -f $APP_DIR/.env"; then
   remote "chmod 600 $APP_DIR/.env"
 fi
 
-echo "==> Building and starting the container"
+# docker compose needs POSTGRES_PASSWORD (the accounts database). Create one on the server if missing.
+remote "grep -q '^POSTGRES_PASSWORD=.' $APP_DIR/.env || echo \"POSTGRES_PASSWORD=\$(openssl rand -hex 24)\" >> $APP_DIR/.env"
+
+echo "==> Building and starting the containers"
 remote "cd $APP_DIR && sudo docker compose up -d --build 2>&1 | tail -5"
 
 echo "==> Waiting for the app"
