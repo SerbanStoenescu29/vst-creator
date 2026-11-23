@@ -91,7 +91,7 @@ the way. To skip the scripts entirely:
 ## Web app / Docker (EC2)
 
 1. On the EC2 instance install Docker (`sudo dnf install -y docker docker-compose-plugin && sudo systemctl enable --now docker` on Amazon Linux 2023).
-2. Clone the repo and create `.env` with `OPENAI_API_KEY=...` (optionally `OPENAI_MODEL`, `LANGSMITH_*`).
+2. Clone the repo and create `.env` with `OPENAI_API_KEY=...` and `ANTHROPIC_API_KEY=...` (optionally `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `LANGSMITH_*`).
 3. `docker compose up -d --build`
 4. Open port 80 in the instance's security group and browse to `http://<ec2-public-ip>/`.
 

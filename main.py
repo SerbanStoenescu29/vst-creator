@@ -48,7 +48,8 @@ from sample_code import fetch_sample_code
 load_dotenv()
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
-REQUIRED_ENV_VARS = ["OPENAI_API_KEY"]
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
 
 SYSTEM_PROMPT = """You are a VST3 plugin generator for Windows.
 
@@ -59,6 +60,8 @@ Do not talk about code and do not suggest coding frameworks. Do not promise to d
 The answer will be in a JSON format.
 
 Clarify with the user that the instructions are correct and complete.
+
+You may ask if the user has UI design preferences, but do not ask for pictures yet.
 
 When the user does not confirm, your output should be:
 {
@@ -162,6 +165,41 @@ def call_openai(messages, temperature=0.3):
     return _openai_llm(messages, temperature)["messages"][0]["content"]
 
 
+@traceable(
+    run_type="llm",
+    name="anthropic",
+    metadata={"ls_provider": "anthropic", "ls_model_name": ANTHROPIC_MODEL},
+)
+def _anthropic_llm(system, messages):
+    response = httpx.post(
+        os.getenv("ANTHROPIC_URL", "https://api.anthropic.com/v1/messages"),
+        headers={
+            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={"model": ANTHROPIC_MODEL, "max_tokens": 24000, "system": system, "messages": messages},
+        timeout=600,
+    )
+    response.raise_for_status()
+    data = response.json()
+    usage = data.get("usage") or {}
+    text = "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
+    return {
+        "messages": [{"role": "assistant", "content": text}],
+        "usage_metadata": {
+            "input_tokens": int(usage.get("input_tokens", 0)),
+            "output_tokens": int(usage.get("output_tokens", 0)),
+            "total_tokens": int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)),
+        },
+    }
+
+
+def call_anthropic(system, messages):
+    """Used only for writing the plugin code; everything else goes through call_openai."""
+    return _anthropic_llm(system, messages)["messages"][0]["content"]
+
+
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
@@ -218,10 +256,12 @@ def fetch_sample(state: VSTInfo) -> dict:
 
 
 def _parse_json_object(raw: str) -> dict:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`").removeprefix("json").strip()
-    return json.loads(text)
+    """Parse the first JSON object in the answer; the model may add prose or code fences around it."""
+    start = raw.find("{")
+    if start < 0:
+        raise ValueError("The model's answer contains no JSON object")
+    obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+    return obj
 
 
 def write_code(state: VSTInfo) -> dict:
@@ -244,13 +284,7 @@ def write_code(state: VSTInfo) -> dict:
     values = {**state["sample_code"], "description": state["description"], "previous_attempt": previous_attempt}
     # One pass, so braces inside the substituted text are never treated as placeholders.
     prompt = re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), WRITE_CODE_PROMPT)
-    raw = call_openai(
-        [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": "Generate the plugin now."},
-        ],
-        temperature=0.2,
-    )
+    raw = call_anthropic(prompt, [{"role": "user", "content": "Generate the plugin now."}])
     return {"generated_code": _parse_json_object(raw)}
 
 
