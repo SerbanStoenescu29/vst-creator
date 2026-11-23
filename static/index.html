@@ -21,6 +21,15 @@
   .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .3px; }
   .brand i { width: 12px; height: 12px; border-radius: 50%; background: linear-gradient(135deg,var(--accent2),var(--hot)); box-shadow: 0 0 12px var(--accent2); }
   .brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .drawer { position: fixed; top: 0; bottom: 0; left: 0; z-index: 8; width: 300px; max-width: 86vw; padding: 64px 12px 12px; overflow-y: auto;
+    background: #12162f; border-right: 1px solid var(--line); box-shadow: 10px 0 40px rgba(0,0,0,.45); transform: translateX(-102%); transition: transform .2s ease; }
+  .drawer.open { transform: none; }
+  .drawer h3 { margin: 0 8px 10px; font-size: 13px; letter-spacing: .6px; text-transform: uppercase; color: var(--muted); }
+  .drawer ul { list-style: none; margin: 0; padding: 0; }
+  .drawer li button { display: block; width: 100%; text-align: left; padding: 9px 12px; margin-bottom: 4px; border: 0; border-radius: 10px;
+    background: none; color: var(--text); font: inherit; font-size: 14px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drawer li button:hover, .drawer li button.current { background: var(--card); }
+  .drawer .empty { padding: 8px 12px; color: var(--muted); font-size: 14px; }
   .who { color: var(--muted); font-size: 14px; margin-right: 10px; }
   .actions { display: flex; align-items: center; gap: 8px; }
   header button { background: var(--card); border: 1px solid var(--line); color: var(--text); border-radius: 999px; padding: 6px 16px; cursor: pointer; }
@@ -100,10 +109,13 @@
   <div class="brand"><i></i>VST3 Creator<small>describe it, we build it</small></div>
   <div class="actions">
     <span class="who" id="who"></span>
+    <button id="history" type="button">History</button>
     <button id="new" type="button">New chat</button>
     <button id="logout" type="button">Sign out</button>
   </div>
 </header>
+
+<aside class="drawer" id="drawer" aria-label="Saved conversations"><h3>Conversations</h3><ul id="convList"></ul></aside>
 
 <div class="auth" id="auth" hidden>
   <form class="card" id="authForm" autocomplete="on">
@@ -218,6 +230,15 @@ function add(role, text) {
   return m;
 }
 
+function addDownload(m, id) {
+  const a = document.createElement("a");
+  a.href = "/api/download/" + id;
+  a.textContent = "Download VST3 plugin (zip)";
+  a.className = "download";
+  m.appendChild(document.createElement("br"));
+  m.appendChild(a);
+}
+
 function setBusy(b) {
   busy = b;
   send.disabled = b || done;
@@ -259,14 +280,7 @@ async function call(message) {
     done = final.done;
     t.classList.remove("typing");
     t.textContent = final.reply;
-    if (final.download_url) {
-      const a = document.createElement("a");
-      a.href = final.download_url;
-      a.textContent = "Download VST3 plugin (zip)";
-      a.className = "download";
-      t.appendChild(document.createElement("br"));
-      t.appendChild(a);
-    }
+    if (final.download_url) addDownload(t, final.thread_id);
   } catch (e) {
     t.classList.remove("typing");
     t.textContent = "Error: " + e.message;
@@ -274,6 +288,7 @@ async function call(message) {
   setBusy(false);
   if (!done) input.focus();
   log.scrollTop = log.scrollHeight;
+  loadList();
 }
 
 document.getElementById("form").addEventListener("submit", e => {
@@ -288,8 +303,50 @@ input.addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
 });
 input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; });
+// ---- saved conversations ----
+const drawer = document.getElementById("drawer"), convList = document.getElementById("convList");
+
+async function loadList() {
+  const r = await fetch("/api/conversations");
+  if (!r.ok) return;
+  const items = await r.json();
+  convList.innerHTML = "";
+  if (!items.length) { convList.innerHTML = '<li class="empty">No conversations yet.</li>'; return; }
+  for (const c of items) {
+    const li = document.createElement("li"), b = document.createElement("button");
+    b.textContent = c.title; b.title = c.title;
+    if (c.id === threadId) b.className = "current";
+    b.addEventListener("click", () => openConversation(c.id));
+    li.appendChild(b); convList.appendChild(li);
+  }
+}
+
+async function openConversation(id) {
+  if (busy) return;
+  const r = await fetch("/api/conversations/" + id);
+  if (r.status === 401) { showAuth(); return; }
+  if (!r.ok) return;
+  const c = await r.json();
+  resetChat();
+  for (const m of c.messages) {
+    const el = add(m.role === "user" ? "user" : "bot", m.content);
+    if (m.download) addDownload(el, c.id);
+  }
+  threadId = c.id;
+  done = !c.active;
+  if (done && !c.messages.some(m => m.download)) add("bot", "This conversation has ended. Start a new chat to build another plugin.");
+  setBusy(false);
+  drawer.classList.remove("open");
+  loadList();
+}
+
+document.getElementById("history").addEventListener("click", () => { drawer.classList.toggle("open"); if (drawer.classList.contains("open")) loadList(); });
+document.addEventListener("click", e => {
+  if (drawer.classList.contains("open") && !drawer.contains(e.target) && e.target.id !== "history") drawer.classList.remove("open");
+});
+
 function resetChat() { log.innerHTML = ""; threadId = null; done = false; setBusy(false); }
-document.getElementById("new").addEventListener("click", () => { resetChat(); call(null); });
+document.getElementById("new").addEventListener("click", () => { drawer.classList.remove("open"); resetChat(); call(null); });
 
 // ---- accounts ----
 const authEl = document.getElementById("auth"), authForm = document.getElementById("authForm"),
@@ -331,7 +388,7 @@ authForm.addEventListener("submit", async e => {
 });
 document.getElementById("logout").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });
-  resetChat(); showAuth();
+  resetChat(); drawer.classList.remove("open"); convList.innerHTML = ""; showAuth();
 });
 
 (async function init() {

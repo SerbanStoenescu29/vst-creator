@@ -16,6 +16,7 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 import auth
+import chats
 import main
 
 main.check_env()
@@ -25,7 +26,10 @@ app_graph = main.build_graph(InMemorySaver())
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
-_owners: dict[str, int] = {}  # thread_id -> id of the user who started it
+# A new conversation is only saved once the user sends a first message, so that opening
+# or reloading the page does not fill the history with empty conversations.
+# thread_id -> (user id, the opening question the assistant showed)
+_pending: dict[str, tuple[int, str]] = {}
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "session"
@@ -35,6 +39,7 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE") == "1"  # set when served over HTTPS
 @asynccontextmanager
 async def lifespan(_app):
     auth.init_db()
+    chats.init_schema()
     yield
 
 
@@ -137,10 +142,11 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
     """Streams newline-delimited JSON: {"status": ...} while nodes run, then {"final": ...}."""
     if body.message is None:  # a new conversation, owned by the signed-in user
         thread_id = uuid.uuid4().hex
-        _owners[thread_id] = user["id"]
+        _pending[thread_id] = (user["id"], "")
     else:
         thread_id = body.thread_id or ""
-        if _owners.get(thread_id) != user["id"]:
+        pending = _pending.get(thread_id)
+        if not ((pending and pending[0] == user["id"]) or chats.owner(thread_id) == user["id"]):
             raise HTTPException(404, "Conversation not found")
     config = {"configurable": {"thread_id": thread_id}}
     if body.message is None:
@@ -151,6 +157,13 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
         if not app_graph.get_state(config).next:
             raise HTTPException(409, "Conversation not active or already finished")
         graph_input = Command(resume=body.message)
+        if pending:  # first message: the conversation is saved from here on
+            chats.create_conversation(thread_id, user["id"])
+            if pending[1]:
+                chats.add_message(thread_id, "assistant", pending[1])
+            del _pending[thread_id]
+        chats.add_message(thread_id, "user", body.message)
+        chats.set_title_from(thread_id, body.message)
 
     def events():
         with _lock_for(thread_id):
@@ -161,7 +174,14 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
                         yield json.dumps(chunk) + "\n"
                     else:
                         last = chunk
-                yield json.dumps({"final": _final_event(thread_id, last)}) + "\n"
+                event = _final_event(thread_id, last)
+                if thread_id in _pending:
+                    _pending[thread_id] = (user["id"], event["reply"])
+                else:
+                    chats.add_message(thread_id, "assistant", event["reply"], bool(event.get("download_url")))
+                    if event.get("download_url"):
+                        chats.set_plugin(thread_id, last["plugin_zip"])
+                yield json.dumps({"final": event}) + "\n"
             except Exception as e:  # surface failures to the page instead of cutting the stream
                 yield json.dumps({"error": f"{type(e).__name__}: {e}"}) + "\n"
 
@@ -171,13 +191,25 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
 @app.get("/api/download/{thread_id}")
 def download(thread_id: str, user: dict = Depends(current_user)):
     """Serve the built plugin zip for a finished conversation."""
-    if _owners.get(thread_id) != user["id"]:
-        raise HTTPException(404, "No plugin available for this conversation")
-    config = {"configurable": {"thread_id": thread_id}}
-    plugin_zip = app_graph.get_state(config).values.get("plugin_zip")
+    plugin_zip = chats.plugin_path(thread_id, user["id"])
     if not plugin_zip or not Path(plugin_zip).is_file():
         raise HTTPException(404, "No plugin available for this conversation")
     return FileResponse(plugin_zip, media_type="application/zip", filename="vst3-plugin.zip")
+
+
+@app.get("/api/conversations")
+def conversations(user: dict = Depends(current_user)):
+    return chats.list_conversations(user["id"])
+
+
+@app.get("/api/conversations/{thread_id}")
+def conversation(thread_id: str, user: dict = Depends(current_user)):
+    conv = chats.get_conversation(thread_id, user["id"])
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+    # Still resumable only while the graph state is in memory (it is lost on a restart).
+    conv["active"] = bool(app_graph.get_state({"configurable": {"thread_id": thread_id}}).next)
+    return conv
 
 
 @app.get("/healthz")
