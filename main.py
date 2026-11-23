@@ -298,7 +298,7 @@ def wait_for_build(state: VSTInfo) -> dict:
         try:
             update["plugin_zip"] = download_plugin(result["run_id"], Path(state["output_dir"]) / "vst3.zip")
             update["build_message"] = "Build succeeded! Your VST3 plugin is ready - download it below."
-        except RuntimeError as e:
+        except (RuntimeError, httpx.HTTPError) as e:
             update["build_message"] = (
                 f"The build succeeded, but the plugin could not be downloaded ({e}). "
                 f"You can get it from the Artifacts section of {result['url']}"

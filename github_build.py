@@ -65,7 +65,15 @@ POLL_SECONDS = int(os.getenv("BUILD_POLL_SECONDS", "15"))
 
 
 def _get(url: str, **kwargs) -> httpx.Response:
-    response = httpx.get(url, headers=_headers(), timeout=60, follow_redirects=True, **kwargs)
+    """GET with a few retries: a dropped connection must not abort a 20-minute wait."""
+    for attempt in range(4):
+        try:
+            response = httpx.get(url, headers=_headers(), timeout=60, follow_redirects=True, **kwargs)
+            break
+        except httpx.TransportError:
+            if attempt == 3:
+                raise
+            time.sleep(2 * (attempt + 1))
     if response.status_code >= 400:
         raise RuntimeError(f"GitHub {url} -> {response.status_code}: {response.text[:300]}")
     return response
@@ -107,7 +115,10 @@ def wait_for_build(branch: str, timeout_seconds: int = 20 * 60, on_wait=None) ->
     started = time.monotonic()
     run = None
     while time.monotonic() - started < timeout_seconds:
-        run = _find_run(repo, workflow, branch)
+        try:
+            run = _find_run(repo, workflow, branch) or run
+        except httpx.TransportError:
+            pass  # still unreachable after retries: try again on the next poll
         if run and run["status"] == "completed":
             if run["conclusion"] == "success":
                 return {"status": "success", "url": run["html_url"], "run_id": run["id"], "error": ""}
