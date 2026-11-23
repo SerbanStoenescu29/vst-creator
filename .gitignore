@@ -9,3 +9,5 @@ sl.log
 *.bak
 langsmith_cheatset.txt
 output/
+rag_data/juce_modules/
+rag_data/doxygen/

@@ -7,8 +7,8 @@ Flow:
                   continue -> ask_ui: "do you have a picture of the UI?" (the model decides yes/no)
                       no  -> fetch_sample
                       yes -> ask_image (a picture is required) -> analyze_ui -> fetch_sample
-                  fetch_sample -> write_code -> save_files -> build_plugin -> wait_for_build -> END (success)
-                  wait_for_build failed -> write_code again, with the build errors
+                  fetch_sample -> retrieve_docs (RAG over the JUCE docs) -> write_code -> save_files -> build_plugin -> wait_for_build -> END (success)
+                  wait_for_build failed -> retrieve_docs -> write_code again, with the build errors
 
 Run it two ways:
 
@@ -42,6 +42,7 @@ from langgraph.types import Command, interrupt
 from langsmith import traceable
 
 from github_build import download_plugin, trigger_build, wait_for_build as poll_build
+import rag
 from sample_code import fetch_sample_code
 
 # Load .env at import time: LangGraph Studio imports this file and never calls main().
@@ -98,7 +99,7 @@ And the following description:
 
 {description}
 
-{previous_attempt}Generate a VST3 plugin with C++ and Juce.
+{rag_context}{previous_attempt}Generate a VST3 plugin with C++ and Juce.
 
 Rules:
  - do not change the CMakeLists.txt file and do not generate a new one.
@@ -119,6 +120,7 @@ class VSTInfo(TypedDict, total=False):
     description: str
     messages: list  # chat history sent to the model
     action: str  # "reply" or "continue", from the model's JSON
+    rag_context: str  # JUCE documentation found by retrieve_docs
     sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
     generated_code: dict  # {plugin_editor_h, plugin_editor_cpp, plugin_processor_h, plugin_processor_cpp}
     output_dir: str  # project folder (CMakeLists.txt + Source/) the sources were saved to
@@ -264,6 +266,39 @@ def _parse_json_object(raw: str) -> dict:
     return obj
 
 
+SEARCH_QUERIES_PROMPT = """You help write a JUCE 8 VST3 plugin. From the plugin description{error_hint} below, list up to 6 short
+search queries (JUCE class names, methods or concepts) whose API documentation is needed to write the code
+correctly. Answer only with a JSON array of strings.
+
+Description:
+{description}
+{error}"""
+
+
+def retrieve_docs(state: VSTInfo) -> dict:
+    """Look up the JUCE documentation relevant to the plugin (and to the last build error) for write_code."""
+    get_stream_writer()({"status": "Searching the JUCE docs"})
+    error = state.get("build_error") or ""
+    prompt = SEARCH_QUERIES_PROMPT.format(
+        error_hint=" and the build errors" if error else "",
+        description=state["description"],
+        error=f"\nBuild errors:\n{error[:3000]}" if error else "",
+    )
+    try:
+        text = call_openai([{"role": "user", "content": prompt}], temperature=0)
+        queries = [str(q) for q in json.JSONDecoder().raw_decode(text[text.index("["):])[0]][:6]
+    except Exception:
+        queries = []
+    queries = queries or [state["description"][:1000]]
+    try:
+        context = rag.retrieve(queries)
+    except Exception:  # missing index or embedding failure: write the code without the docs
+        context = ""
+    if context:
+        context = f"Relevant JUCE 8.0.8 API documentation (use it to get the signatures right):\n\n{context}\n\n"
+    return {"rag_context": context}
+
+
 def write_code(state: VSTInfo) -> dict:
     """Ask the model to write the plugin sources from the samples and the description."""
     if state.get("build_error"):
@@ -281,7 +316,7 @@ def write_code(state: VSTInfo) -> dict:
             f"{state['build_error']}\n\n"
             "Fix these errors. Return the complete corrected files.\n\n"
         )
-    values = {**state["sample_code"], "description": state["description"], "previous_attempt": previous_attempt}
+    values = {**state["sample_code"], "description": state["description"], "rag_context": state.get("rag_context", ""), "previous_attempt": previous_attempt}
     # One pass, so braces inside the substituted text are never treated as placeholders.
     prompt = re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), WRITE_CODE_PROMPT)
     raw = call_anthropic(prompt, [{"role": "user", "content": "Generate the plugin now."}])
@@ -447,6 +482,7 @@ def build_graph(checkpointer=None):
     builder.add_node("ask_image", ask_image)
     builder.add_node("analyze_ui", analyze_ui)
     builder.add_node("fetch_sample", fetch_sample)
+    builder.add_node("retrieve_docs", retrieve_docs)
     builder.add_node("write_code", write_code)
     builder.add_node("save_files", save_files)
     builder.add_node("build_plugin", build_plugin)
@@ -466,14 +502,15 @@ def build_graph(checkpointer=None):
     )
     builder.add_edge("ask_image", "analyze_ui")
     builder.add_edge("analyze_ui", "fetch_sample")
-    builder.add_edge("fetch_sample", "write_code")
+    builder.add_edge("fetch_sample", "retrieve_docs")
+    builder.add_edge("retrieve_docs", "write_code")
     builder.add_edge("write_code", "save_files")
     builder.add_edge("save_files", "build_plugin")
     builder.add_edge("build_plugin", "wait_for_build")
     builder.add_conditional_edges(
         "wait_for_build",
         route_after_build,
-        {"done": END, "retry": "write_code", "give_up": "give_up"},
+        {"done": END, "retry": "retrieve_docs", "give_up": "give_up"},
     )
     builder.add_edge("give_up", END)
     return builder.compile(checkpointer=checkpointer)
