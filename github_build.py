@@ -28,10 +28,9 @@ def _post(url: str, payload: dict) -> httpx.Response:
     return response
 
 
-def trigger_build(project_dir: str, branch: str, email: str = "") -> str:
+def trigger_build(project_dir: str, branch: str) -> str:
     """Commit every file under project_dir to a new parentless branch `branch`
-    of GITHUB_REPO, then dispatch the build-vst.yml workflow against it. When the build
-    succeeds, the workflow e-mails the plugin to `email` (if given).
+    of GITHUB_REPO, then dispatch the build-vst.yml workflow against it.
     Returns the Actions page URL."""
     repo = os.getenv("GITHUB_REPO", "SerbanStoenescu29/vst-creator")
     workflow = os.getenv("GITHUB_BUILD_WORKFLOW", "build-vst.yml")
@@ -57,7 +56,7 @@ def trigger_build(project_dir: str, branch: str, email: str = "") -> str:
 
     _post(
         f"{API}/repos/{repo}/actions/workflows/{workflow}/dispatches",
-        {"ref": workflow_ref, "inputs": {"branch": branch, "email": email}},
+        {"ref": workflow_ref, "inputs": {"branch": branch}},
     )
     return f"https://github.com/{repo}/actions/workflows/{workflow}"
 
@@ -111,8 +110,8 @@ def wait_for_build(branch: str, timeout_seconds: int = 20 * 60, on_wait=None) ->
         run = _find_run(repo, workflow, branch)
         if run and run["status"] == "completed":
             if run["conclusion"] == "success":
-                return {"status": "success", "url": run["html_url"], "error": ""}
-            return {"status": "failed", "url": run["html_url"], "error": _error_excerpt(repo, run["id"])}
+                return {"status": "success", "url": run["html_url"], "run_id": run["id"], "error": ""}
+            return {"status": "failed", "url": run["html_url"], "run_id": run["id"], "error": _error_excerpt(repo, run["id"])}
         if on_wait:
             on_wait(int(time.monotonic() - started))
         time.sleep(POLL_SECONDS)
@@ -121,3 +120,15 @@ def wait_for_build(branch: str, timeout_seconds: int = 20 * 60, on_wait=None) ->
         "url": run["html_url"] if run else "",
         "error": f"The build did not finish within {timeout_seconds // 60} minutes.",
     }
+
+
+def download_plugin(run_id: int, dest: Path) -> str:
+    """Download the build's VST3 artifact (a zip) from the finished run to `dest`."""
+    repo = os.getenv("GITHUB_REPO", "SerbanStoenescu29/vst-creator")
+    artifacts = _get(f"{API}/repos/{repo}/actions/runs/{run_id}/artifacts").json()["artifacts"]
+    if not artifacts:
+        raise RuntimeError("the run produced no artifact")
+    # The API redirects to short-lived storage; httpx drops the token on that cross-origin hop.
+    data = _get(f"{API}/repos/{repo}/actions/artifacts/{artifacts[0]['id']}/zip").content
+    dest.write_bytes(data)
+    return str(dest)

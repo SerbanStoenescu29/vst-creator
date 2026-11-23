@@ -44,7 +44,7 @@ def _final_event(thread_id: str, values: dict) -> dict:
         "reply": values.get("build_message") or "Done.",
         "done": True,
         "description": values.get("description", ""),
-        "email": values.get("email", ""),
+        "download_url": f"/api/download/{thread_id}" if values.get("plugin_zip") else "",
     }
 
 
@@ -76,6 +76,16 @@ def chat(body: ChatIn):
                 yield json.dumps({"error": f"{type(e).__name__}: {e}"}) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
+
+
+@app.get("/api/download/{thread_id}")
+def download(thread_id: str):
+    """Serve the built plugin zip for a finished conversation."""
+    config = {"configurable": {"thread_id": thread_id}}
+    plugin_zip = app_graph.get_state(config).values.get("plugin_zip")
+    if not plugin_zip or not Path(plugin_zip).is_file():
+        raise HTTPException(404, "No plugin available for this conversation")
+    return FileResponse(plugin_zip, media_type="application/zip", filename="vst3-plugin.zip")
 
 
 @app.get("/healthz")

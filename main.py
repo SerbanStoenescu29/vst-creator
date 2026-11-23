@@ -38,7 +38,7 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 from langsmith import traceable
 
-from github_build import trigger_build, wait_for_build as poll_build
+from github_build import download_plugin, trigger_build, wait_for_build as poll_build
 from sample_code import fetch_sample_code
 
 # Load .env at import time: LangGraph Studio imports this file and never calls main().
@@ -63,11 +63,10 @@ When the user does not confirm, your output should be:
 "answer": <your answer to the user>
 }
 
-When the user confirms that everything is correct and complete, ask for an e-mail address where the product will be delivered. When you have the confirmation that everything is correct and the e-mail address, the answer in this case should be:
+When the user confirms that everything is correct and complete, the answer in this case should be:
 {
 "action" : "continue",
-"full_description": full detailed description of what the user wants,
-"email": user's e-mail address
+"full_description": full detailed description of what the user wants
 }
 """
 
@@ -109,9 +108,9 @@ Rules:
 """
 
 
+
 class VSTInfo(TypedDict, total=False):
     description: str
-    email: str
     messages: list  # chat history sent to the model
     action: str  # "reply" or "continue", from the model's JSON
     sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
@@ -123,6 +122,7 @@ class VSTInfo(TypedDict, total=False):
     build_error: str  # compiler/CMake errors from the last failed build
     build_attempts: int  # how many builds have been started
     build_message: str  # final message shown to the user
+    plugin_zip: str  # the built VST3 (zip) downloaded from the GitHub Actions artifact
     answer: str  # what to show the user when action == "reply"
 
 
@@ -195,7 +195,6 @@ def assistant(state: VSTInfo) -> dict:
             "messages": messages,
             "action": "continue",
             "description": data.get("full_description", ""),
-            "email": data.get("email", ""), #TODO: validate e-mail?
         }
     return {"messages": messages, "action": "reply", "answer": str(data.get("answer", ""))}
 
@@ -270,7 +269,7 @@ def build_plugin(state: VSTInfo) -> dict:
     """Push the project to a GitHub branch and trigger the Visual Studio build workflow."""
     get_stream_writer()({"status": "Building plugin"})
     branch = f"build/{Path(state['output_dir']).name}"
-    url = trigger_build(state["output_dir"], branch, state.get("email", ""))
+    url = trigger_build(state["output_dir"], branch)
     return {
         "build_branch": branch,
         "build_url": url,
@@ -295,11 +294,15 @@ def wait_for_build(state: VSTInfo) -> dict:
     update = {"build_status": result["status"], "build_url": result["url"] or state["build_url"]}
     if result["status"] == "success":
         update["build_error"] = ""
-        update["build_message"] = (
-            "Build succeeded! Your VST3 plugin was built"
-            + (f" and is being e-mailed to {state['email']}" if state.get("email") else "")
-            + f". You can also download it from the Artifacts section of {result['url']}"
-        )
+        writer({"status": "Downloading plugin"})
+        try:
+            update["plugin_zip"] = download_plugin(result["run_id"], Path(state["output_dir"]) / "vst3.zip")
+            update["build_message"] = "Build succeeded! Your VST3 plugin is ready - download it below."
+        except RuntimeError as e:
+            update["build_message"] = (
+                f"The build succeeded, but the plugin could not be downloaded ({e}). "
+                f"You can get it from the Artifacts section of {result['url']}"
+            )
     else:
         update["build_error"] = result["error"]
     return update

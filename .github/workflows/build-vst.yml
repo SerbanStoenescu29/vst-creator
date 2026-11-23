@@ -9,10 +9,6 @@ on:
         description: Branch holding the generated project (CMakeLists.txt + Source/)
         required: true
         type: string
-      email:
-        description: Address to send the built plugin to (optional)
-        required: false
-        type: string
 
 jobs:
   build:
@@ -35,26 +31,3 @@ jobs:
           name: vst3-${{ github.run_id }}
           path: build/**/Release/VST3/**
           if-no-files-found: error
-
-      - name: Package VST3
-        if: ${{ inputs.email != '' }}
-        shell: pwsh
-        run: |
-          $dir = Get-ChildItem -Path build -Recurse -Directory -Filter VST3 |
-                 Where-Object { $_.FullName -match 'Release' } | Select-Object -First 1
-          Compress-Archive -Path "$($dir.FullName)\*" -DestinationPath vst3.zip
-
-      - name: Send the plugin by e-mail
-        if: ${{ inputs.email != '' }}
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_SERVER }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          secure: true
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          from: ${{ secrets.MAIL_FROM }}
-          to: ${{ inputs.email }}
-          subject: Your VST3 plugin is ready
-          body: Your VST3 plugin was built successfully. It is attached as vst3.zip (Windows, x64).
-          attachments: vst3.zip
