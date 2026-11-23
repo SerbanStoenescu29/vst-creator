@@ -5,32 +5,159 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VST3 Creator</title>
 <style>
-  :root { --bg:#212121; --panel:#2f2f2f; --text:#ececec; --muted:#9b9b9b; --accent:#10a37f; }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#fff; --panel:#f4f4f4; --text:#1f1f1f; --muted:#6b6b6b; }
+  :root {
+    --bg1:#0b1020; --bg2:#1a1140; --card:rgba(255,255,255,.06); --line:rgba(255,255,255,.12);
+    --text:#eef0ff; --muted:#9aa3d1; --accent:#7c5cff; --accent2:#22d3ee; --hot:#ff4d8d;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
-  body { background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
-  header { padding: 14px 20px; font-weight: 600; border-bottom: 1px solid rgba(128,128,128,.25); display:flex; justify-content:space-between; align-items:center; }
-  header button { background: none; border: 1px solid rgba(128,128,128,.4); color: var(--text); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
-  #log { flex: 1; overflow-y: auto; padding: 24px 16px; }
-  .row { max-width: 760px; margin: 0 auto 20px; display: flex; }
+  body {
+    color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #2a1a6e 0%, transparent 60%),
+                linear-gradient(180deg, var(--bg2), var(--bg1) 70%);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  header { padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .3px; }
+  .brand i { width: 12px; height: 12px; border-radius: 50%; background: linear-gradient(135deg,var(--accent2),var(--hot)); box-shadow: 0 0 12px var(--accent2); }
+  .brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  header button { background: var(--card); border: 1px solid var(--line); color: var(--text); border-radius: 999px; padding: 6px 16px; cursor: pointer; }
+  header button:hover { border-color: var(--accent2); }
+
+  /* ---- stage with the robot ---- */
+  .stage { position: relative; height: 230px; flex: none; display: flex; justify-content: center; align-items: flex-end; }
+  .stage::after { content:""; position:absolute; bottom: 6px; left:50%; width: 340px; height: 38px; transform: translateX(-50%);
+    background: radial-gradient(closest-side, rgba(124,92,255,.55), transparent); filter: blur(6px); }
+  .eq { position:absolute; bottom: 14px; left: 50%; transform: translateX(-50%); display:flex; gap:6px; align-items:flex-end; height: 120px; width: 420px; justify-content: space-between; opacity:.35; }
+  .eq b { flex:1; border-radius: 4px 4px 0 0; background: linear-gradient(180deg,var(--accent2),var(--accent)); height: 20%; animation: eq 1.4s ease-in-out infinite; }
+  .eq b:nth-child(3n) { animation-duration: 1.1s; } .eq b:nth-child(4n) { animation-duration: 1.7s; background: linear-gradient(180deg,var(--hot),var(--accent)); }
+  .eq b:nth-child(odd) { animation-delay: -.5s; } .eq b:nth-child(5n) { animation-delay: -.9s; }
+  @keyframes eq { 0%,100% { height: 14%; } 50% { height: 70%; } }
+  body.working .eq b { animation-duration: .6s; }
+  .robot { position: relative; z-index: 1; width: 260px; height: 220px; overflow: visible; animation: bob 2.4s ease-in-out infinite; }
+  body.working .robot { animation-duration: .8s; }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+  .blink { transform-box: fill-box; transform-origin: center; animation: blink 4.5s infinite; }
+  @keyframes blink { 0%,94%,100% { transform: scaleY(1); } 97% { transform: scaleY(.1); } }
+  .antenna-dot { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:.4; } 50% { opacity:1; } }
+  .strum { transform-box: view-box; transform-origin: 168px 96px; animation: strum 1.3s ease-in-out infinite; }
+  body.working .strum { animation-duration: .35s; }
+  @keyframes strum { 0%,100% { transform: rotate(-9deg); } 50% { transform: rotate(11deg); } }
+  .sway { transform-box: view-box; transform-origin: 130px 120px; animation: sway 2.4s ease-in-out infinite; }
+  @keyframes sway { 0%,100% { transform: rotate(-1.5deg); } 50% { transform: rotate(1.5deg); } }
+  .note { font-size: 20px; fill: var(--accent2); opacity: 0; animation: float 3.4s ease-in infinite; }
+  .note.n2 { fill: var(--hot); animation-delay: 1.1s; } .note.n3 { fill: #ffd166; animation-delay: 2.2s; }
+  body.working .note { animation-duration: 1.8s; }
+  @keyframes float { 0% { opacity:0; transform: translate(0,0) rotate(0); } 15% { opacity:1; } 100% { opacity:0; transform: translate(22px,-90px) rotate(18deg); } }
+  body.celebrate .robot { animation: jump .7s ease-in-out infinite; }
+  @keyframes jump { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-18px); } }
+
+  /* ---- chat ---- */
+  #log { flex: 1; overflow-y: auto; padding: 8px 16px 12px; scroll-behavior: smooth; }
+  .row { max-width: 760px; margin: 0 auto 14px; display: flex; animation: in .25s ease-out; }
+  @keyframes in { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform:none; } }
   .row.user { justify-content: flex-end; }
-  .msg { padding: 10px 16px; border-radius: 18px; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .user .msg { background: var(--panel); }
-  .bot .msg { padding-left: 0; }
-  .download { display: inline-block; margin-top: 8px; padding: 8px 16px; border-radius: 10px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+  .msg { padding: 11px 18px; border-radius: 20px; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bot .msg { background: var(--card); border: 1px solid var(--line); border-top-left-radius: 6px; backdrop-filter: blur(6px); }
+  .user .msg { background: linear-gradient(135deg, var(--accent), #5b8cff); border-top-right-radius: 6px; box-shadow: 0 6px 20px rgba(124,92,255,.35); }
   .typing { color: var(--muted); }
+  .typing::before { content:""; display:inline-block; width:8px; height:8px; margin-right:8px; border-radius:50%; background: var(--accent2); animation: pulse 1s infinite; }
+  .download { display:inline-block; margin-top:10px; padding:9px 18px; border-radius:12px; color:#fff; font-weight:600; text-decoration:none;
+    background: linear-gradient(135deg,var(--accent2),var(--accent)); box-shadow: 0 6px 20px rgba(34,211,238,.3); }
+  .download:hover { filter: brightness(1.1); }
   form { max-width: 760px; width: 100%; margin: 0 auto; padding: 0 16px 20px; }
-  .box { display: flex; gap: 8px; align-items: flex-end; background: var(--panel); border-radius: 24px; padding: 8px 8px 8px 18px; }
+  .box { display: flex; gap: 8px; align-items: flex-end; background: var(--card); border: 1px solid var(--line); border-radius: 26px; padding: 8px 8px 8px 20px; }
+  .box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,.25); }
   textarea { flex: 1; resize: none; max-height: 200px; background: none; border: 0; outline: 0; color: var(--text); font: inherit; padding: 6px 0; }
-  #send { width: 38px; height: 38px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; font-size: 18px; cursor: pointer; }
+  textarea::placeholder { color: var(--muted); }
+  #send { width: 40px; height: 40px; border-radius: 50%; border: 0; background: linear-gradient(135deg,var(--accent2),var(--accent)); color: #fff; font-size: 18px; cursor: pointer; }
   #send:disabled, textarea:disabled { opacity: .4; cursor: default; }
+  @media (max-height: 640px) { .stage { height: 150px; } .robot { transform-origin: bottom; scale: .65; } .eq { height: 80px; } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; } }
 </style>
 </head>
 <body>
-<header><span>VST3 Creator</span><button id="new" type="button">New chat</button></header>
+<header>
+  <div class="brand"><i></i>VST3 Creator<small>describe it, we build it</small></div>
+  <button id="new" type="button">New chat</button>
+</header>
+
+<div class="stage" aria-hidden="true">
+  <div class="eq"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></div>
+  <svg class="robot" viewBox="0 0 260 220" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e6ebff"/><stop offset="1" stop-color="#9aa8e8"/></linearGradient>
+      <linearGradient id="dark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a3f7a"/><stop offset="1" stop-color="#1c2050"/></linearGradient>
+      <linearGradient id="gbody" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff4d8d"/><stop offset="1" stop-color="#ff9b3d"/></linearGradient>
+      <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c58a4a"/><stop offset="1" stop-color="#8b5a2b"/></linearGradient>
+      <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+
+    <!-- floating notes -->
+    <text class="note" x="60" y="70">♪</text>
+    <text class="note n2" x="200" y="80">♫</text>
+    <text class="note n3" x="30" y="110">♪</text>
+
+    <!-- legs -->
+    <rect x="104" y="150" width="15" height="40" rx="6" fill="url(#dark)"/>
+    <rect x="141" y="150" width="15" height="40" rx="6" fill="url(#dark)"/>
+    <rect x="98" y="184" width="27" height="14" rx="7" fill="#242a68"/>
+    <rect x="135" y="184" width="27" height="14" rx="7" fill="#242a68"/>
+
+    <!-- torso -->
+    <rect x="92" y="80" width="76" height="74" rx="20" fill="url(#metal)"/>
+    <circle cx="130" cy="108" r="11" fill="#0b1020"/>
+    <circle class="antenna-dot" cx="130" cy="108" r="6" fill="#22d3ee" filter="url(#glow)"/>
+    <rect x="108" y="130" width="44" height="5" rx="2.5" fill="#7c5cff" opacity=".6"/>
+
+    <!-- head -->
+    <line x1="130" y1="22" x2="130" y2="9" stroke="#9aa8e8" stroke-width="3" stroke-linecap="round"/>
+    <circle class="antenna-dot" cx="130" cy="7" r="5" fill="#ff4d8d" filter="url(#glow)"/>
+    <rect x="86" y="38" width="9" height="22" rx="4" fill="#7c5cff"/>
+    <rect x="165" y="38" width="9" height="22" rx="4" fill="#7c5cff"/>
+    <rect x="94" y="20" width="72" height="58" rx="18" fill="url(#metal)"/>
+    <rect x="102" y="32" width="56" height="28" rx="12" fill="#0b1020"/>
+    <ellipse class="blink" cx="118" cy="46" rx="6" ry="7" fill="#22d3ee" filter="url(#glow)"/>
+    <ellipse class="blink" cx="142" cy="46" rx="6" ry="7" fill="#22d3ee" filter="url(#glow)"/>
+    <rect x="118" y="66" width="24" height="4" rx="2" fill="#7c5cff"/>
+    <rect x="122" y="76" width="16" height="8" rx="3" fill="#9aa8e8"/>
+
+    <!-- guitar (strapped across the body), swaying a little -->
+    <g class="sway">
+      <g transform="rotate(24 140 128)">
+        <!-- neck and headstock -->
+        <rect x="20" y="123" width="124" height="10" rx="2" fill="url(#wood)"/>
+        <rect x="20" y="123" width="124" height="4" rx="2" fill="#2a1a10" opacity=".55"/>
+        <path d="M20 121 L2 116 Q-2 126 2 140 L20 135 Z" fill="#2a1a10"/>
+        <circle cx="8" cy="120" r="2" fill="#ffd166"/><circle cx="8" cy="128" r="2" fill="#ffd166"/><circle cx="8" cy="136" r="2" fill="#ffd166"/>
+        <g stroke="#ffd166" stroke-width="1" opacity=".8"><line x1="48" y1="123" x2="48" y2="133"/><line x1="72" y1="123" x2="72" y2="133"/><line x1="94" y1="123" x2="94" y2="133"/><line x1="114" y1="123" x2="114" y2="133"/></g>
+        <!-- body -->
+        <path d="M140 112 C142 100 158 96 168 104 C178 94 200 98 204 114 C208 124 200 130 203 140 C206 156 190 168 172 166 C150 164 136 150 144 138 C148 130 138 124 140 112 Z" fill="url(#gbody)" stroke="#7a1f4a" stroke-width="2"/>
+        <rect x="156" y="116" width="26" height="6" rx="2" fill="#1c1c28"/>
+        <rect x="156" y="130" width="26" height="6" rx="2" fill="#1c1c28"/>
+        <rect x="186" y="118" width="4" height="22" rx="2" fill="#c9cde0"/>
+        <circle cx="168" cy="150" r="3.5" fill="#c9cde0"/><circle cx="180" cy="152" r="3.5" fill="#c9cde0"/>
+        <g stroke="#e8ebff" stroke-width=".8" opacity=".9">
+          <line x1="20" y1="125" x2="188" y2="120"/><line x1="20" y1="128" x2="188" y2="127"/><line x1="20" y1="131" x2="188" y2="134"/>
+        </g>
+      </g>
+      <!-- strap -->
+      <path d="M104 82 L152 138" stroke="#ff4d8d" stroke-width="4" opacity=".75" stroke-linecap="round"/>
+    </g>
+
+    <!-- left arm: holds the neck -->
+    <path d="M96 94 Q84 122 67 99" stroke="url(#dark)" stroke-width="11" stroke-linecap="round" fill="none"/>
+    <circle cx="66" cy="97" r="8" fill="#9aa8e8"/>
+
+    <!-- right arm: strumming -->
+    <g class="strum">
+      <path d="M166 94 Q188 118 170 142" stroke="url(#dark)" stroke-width="11" stroke-linecap="round" fill="none"/>
+      <circle cx="169" cy="145" r="8" fill="#9aa8e8"/>
+    </g>
+  </svg>
+</div>
+
 <div id="log"></div>
 <form id="form">
   <div class="box">
@@ -59,6 +186,8 @@ function setBusy(b) {
   busy = b;
   send.disabled = b || done;
   input.disabled = done;
+  document.body.classList.toggle("working", b);
+  document.body.classList.toggle("celebrate", !b && done);
 }
 
 async function call(message) {
