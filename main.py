@@ -42,6 +42,7 @@ from langgraph.types import Command, interrupt
 from langsmith import traceable
 
 from github_build import download_plugin, trigger_build, wait_for_build as poll_build
+import agent
 import rag
 from sample_code import fetch_sample_code
 
@@ -49,7 +50,6 @@ from sample_code import fetch_sample_code
 load_dotenv()
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
 REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
 
 SYSTEM_PROMPT = """You are a VST3 plugin generator for Windows.
@@ -105,13 +105,9 @@ Rules:
  - do not change the CMakeLists.txt file and do not generate a new one.
  - do not add new dependencies
  - make sure that all your JUCE API calls are compatible with Juce 8.0.8
-- return the output in the following JSON format:
-{
-"plugin_editor_h" : <content of PluginEditor.h>,
-"plugin_editor_cpp" : <content of PluginEditor.cpp>,
-"plugin_processor_h": <content of PluginProcessor.h,
-"plugin_processor_cpp": <content of PluginProcessor.cpp>
-}
+- you are an agent with tools: use search_juce_docs whenever you are unsure about a JUCE class, method or signature,
+  use validate_code on your files, fix any problems it reports, and finish by calling submit_plugin with the
+  complete content of all four files. Do not print the files as text.
 """
 
 
@@ -120,6 +116,7 @@ class VSTInfo(TypedDict, total=False):
     description: str
     messages: list  # chat history sent to the model
     action: str  # "reply" or "continue", from the model's JSON
+    agent_trace: list  # tool calls the code agent made: [{"tool", "input", "result"}]
     rag_context: str  # JUCE documentation found by retrieve_docs
     sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
     generated_code: dict  # {plugin_editor_h, plugin_editor_cpp, plugin_processor_h, plugin_processor_cpp}
@@ -165,41 +162,6 @@ def _openai_llm(messages, temperature):
 
 def call_openai(messages, temperature=0.3):
     return _openai_llm(messages, temperature)["messages"][0]["content"]
-
-
-@traceable(
-    run_type="llm",
-    name="anthropic",
-    metadata={"ls_provider": "anthropic", "ls_model_name": ANTHROPIC_MODEL},
-)
-def _anthropic_llm(system, messages):
-    response = httpx.post(
-        os.getenv("ANTHROPIC_URL", "https://api.anthropic.com/v1/messages"),
-        headers={
-            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={"model": ANTHROPIC_MODEL, "max_tokens": 24000, "system": system, "messages": messages},
-        timeout=600,
-    )
-    response.raise_for_status()
-    data = response.json()
-    usage = data.get("usage") or {}
-    text = "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
-    return {
-        "messages": [{"role": "assistant", "content": text}],
-        "usage_metadata": {
-            "input_tokens": int(usage.get("input_tokens", 0)),
-            "output_tokens": int(usage.get("output_tokens", 0)),
-            "total_tokens": int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)),
-        },
-    }
-
-
-def call_anthropic(system, messages):
-    """Used only for writing the plugin code; everything else goes through call_openai."""
-    return _anthropic_llm(system, messages)["messages"][0]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -257,15 +219,6 @@ def fetch_sample(state: VSTInfo) -> dict:
     return {"sample_code": fetch_sample_code()}
 
 
-def _parse_json_object(raw: str) -> dict:
-    """Parse the first JSON object in the answer; the model may add prose or code fences around it."""
-    start = raw.find("{")
-    if start < 0:
-        raise ValueError("The model's answer contains no JSON object")
-    obj, _ = json.JSONDecoder().raw_decode(raw[start:])
-    return obj
-
-
 SEARCH_QUERIES_PROMPT = """You help write a JUCE 8 VST3 plugin. From the plugin description{error_hint} below, list up to 6 short
 search queries (JUCE class names, methods or concepts) whose API documentation is needed to write the code
 correctly. Answer only with a JSON array of strings.
@@ -319,8 +272,8 @@ def write_code(state: VSTInfo) -> dict:
     values = {**state["sample_code"], "description": state["description"], "rag_context": state.get("rag_context", ""), "previous_attempt": previous_attempt}
     # One pass, so braces inside the substituted text are never treated as placeholders.
     prompt = re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), WRITE_CODE_PROMPT)
-    raw = call_anthropic(prompt, [{"role": "user", "content": "Generate the plugin now."}])
-    return {"generated_code": _parse_json_object(raw)}
+    files, trace = agent.run(prompt, state["sample_code"], on_status=lambda text: get_stream_writer()({"status": text}))
+    return {"generated_code": files, "agent_trace": [*(state.get("agent_trace") or []), *trace]}
 
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
