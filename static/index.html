@@ -84,6 +84,9 @@
   .download { display:inline-block; margin-top:10px; padding:9px 18px; border-radius:12px; color:#fff; font-weight:600; text-decoration:none;
     background: linear-gradient(135deg,var(--accent2),var(--accent)); box-shadow: 0 6px 20px rgba(34,211,238,.3); }
   .download:hover { filter: brightness(1.1); }
+  .msg.failed { border-color: var(--hot); }
+  .retry { margin-top: 10px; padding: 7px 16px; border-radius: 10px; border: 1px solid var(--hot); background: none; color: var(--text, #fff); font-weight: 600; cursor: pointer; }
+  .retry:hover { background: rgba(255,255,255,.08); }
   .report { margin-top: 12px; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; font-size: 14px; background: rgba(255,255,255,.03); }
   .report summary { cursor: pointer; font-weight: 600; }
   .report .badge { display: inline-block; margin-left: 8px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
@@ -318,14 +321,14 @@ function setBusy(b) {
   document.body.classList.toggle("celebrate", !b && done);
 }
 
-async function call(message, image) {
+async function call(message, image, retry) {
   setBusy(true);
   const t = add("bot", "…"); t.classList.add("typing");
   try {
     const r = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, message, image: image || null }),
+      body: JSON.stringify({ thread_id: threadId, message, image: image || null, retry: !!retry }),
     });
     if (r.status === 401) { t.closest(".row").remove(); setBusy(false); showAuth(); return; }
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
@@ -336,7 +339,7 @@ async function call(message, image) {
       const ev = JSON.parse(line);
       if (ev.node) setNode(ev.node);
       else if (ev.status) { t.textContent = ev.status + "…"; log.scrollTop = log.scrollHeight; }
-      else if (ev.error) throw new Error(ev.error);
+      else if (ev.error) { const err = new Error(ev.error); err.retryable = !!ev.retryable; throw err; }
       else if (ev.final) final = ev.final;
     };
     for (;;) {
@@ -357,7 +360,14 @@ async function call(message, image) {
     if (final.done) addReport(t, final.report);
   } catch (e) {
     t.classList.remove("typing");
-    t.textContent = "Error: " + e.message;
+    t.classList.add("failed");
+    t.textContent = e.message;
+    if (e.retryable && threadId) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "retry"; b.textContent = "Try again";
+      b.addEventListener("click", () => { t.closest(".row").remove(); call(null, null, true); });
+      t.appendChild(document.createElement("br")); t.appendChild(b);
+    }
   }
   setBusy(false);
   if (!done) input.focus();

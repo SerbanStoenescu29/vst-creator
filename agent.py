@@ -10,7 +10,7 @@ Tools:
 import os
 import re
 
-import httpx
+import resilience
 from langsmith import traceable
 
 import rag
@@ -100,7 +100,7 @@ def validate(files: dict) -> list[str]:
 
 @traceable(run_type="llm", name="anthropic-agent", metadata={"ls_provider": "anthropic", "ls_model_name": MODEL})
 def _call(system: str, messages: list) -> dict:
-    response = httpx.post(
+    response = resilience.post(
         os.getenv("ANTHROPIC_URL", "https://api.anthropic.com/v1/messages"),
         headers={
             "x-api-key": os.environ["ANTHROPIC_API_KEY"],
@@ -110,7 +110,6 @@ def _call(system: str, messages: list) -> dict:
         json={"model": MODEL, "max_tokens": 24000, "system": system, "messages": messages, "tools": TOOLS},
         timeout=600,
     )
-    response.raise_for_status()
     data = response.json()
     usage = data.get("usage") or {}
     data["usage_metadata"] = {

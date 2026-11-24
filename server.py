@@ -1,6 +1,7 @@
 """Web server for the VST3 chat: FastAPI + a static ChatGPT-style page."""
 
 import json
+import logging
 import os
 import threading
 import time
@@ -13,11 +14,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import auth
 import chats
+import guardrails
 import main
+import resilience
 
 main.check_env()
 
@@ -115,15 +118,24 @@ def me(user: dict = Depends(current_user)):
     return {"username": user["username"]}
 
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
 class ChatIn(BaseModel):
     thread_id: str | None = None
-    message: str | None = None  # None starts a new conversation
+    message: str | None = Field(default=None, max_length=guardrails.MAX_TEXT_CHARS)  # None starts a new conversation
     image: str | None = None  # a picture as a data URL (the UI design), optional
+    retry: bool = False  # run the step that failed again, with no new message
 
 
 def _lock_for(thread_id: str) -> threading.Lock:
     with _locks_guard:
         return _locks.setdefault(thread_id, threading.Lock())
+
+
+def _owns(thread_id: str, user: dict) -> bool:
+    pending = _pending.get(thread_id)
+    return bool((pending and pending[0] == user["id"]) or chats.owner(thread_id) == user["id"])
 
 
 def _final_event(thread_id: str, values: dict) -> dict:
@@ -143,24 +155,45 @@ def _final_event(thread_id: str, values: dict) -> dict:
 @app.post("/api/chat")
 def chat(body: ChatIn, user: dict = Depends(current_user)):
     """Streams newline-delimited JSON: {"status": ...} while nodes run, then {"final": ...}."""
-    if body.message is None:  # a new conversation, owned by the signed-in user
+    if body.retry:  # run the step that failed again
+        thread_id = body.thread_id or ""
+        if not _owns(thread_id, user):
+            raise HTTPException(404, "Conversation not found")
+        config = {"configurable": {"thread_id": thread_id}}
+        if not app_graph.get_state(config).next:
+            raise HTTPException(409, "Nothing to retry")
+        graph_input = None
+    elif body.message is None:  # a new conversation, owned by the signed-in user
         thread_id = uuid.uuid4().hex
         _pending[thread_id] = (user["id"], "")
+        config = {"configurable": {"thread_id": thread_id}}
+        graph_input = {"messages": []}
     else:
         thread_id = body.thread_id or ""
         pending = _pending.get(thread_id)
-        if not ((pending and pending[0] == user["id"]) or chats.owner(thread_id) == user["id"]):
+        if not _owns(thread_id, user):
             raise HTTPException(404, "Conversation not found")
-    config = {"configurable": {"thread_id": thread_id}}
-    if body.message is None:
-        graph_input = {"messages": []}
-    else:
-        if body.image and not (body.image.startswith("data:image/") and len(body.image) <= MAX_IMAGE_CHARS):
-            raise HTTPException(400, "The picture must be an image under 6 MB")
+        config = {"configurable": {"thread_id": thread_id}}
         if not body.message.strip() and not body.image:
             raise HTTPException(400, "Empty message")
-        if not app_graph.get_state(config).next:
+        if body.image:
+            problem = guardrails.check_image(body.image, MAX_IMAGE_CHARS)
+            if problem:
+                raise HTTPException(400, problem)
+        state = app_graph.get_state(config)
+        if not state.next:
             raise HTTPException(409, "Conversation not active or already finished")
+        asked = state.tasks[0].interrupts[0].value if state.tasks and state.tasks[0].interrupts else ""
+        category, refusal = guardrails.check_text(body.message, str(asked))
+        if category != "ok":  # nothing is saved and the graph does not move
+            blocked = {
+                "thread_id": thread_id,
+                "reply": refusal,
+                "done": False,
+                "node": state.next[0],
+                "blocked": category,
+            }
+            return StreamingResponse(iter([json.dumps({"final": blocked}) + "\n"]), media_type="application/x-ndjson")
         graph_input = Command(resume={"text": body.message, "image": body.image or ""})
         if pending:  # first message: the conversation is saved from here on
             chats.create_conversation(thread_id, user["id"])
@@ -194,7 +227,8 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
                         chats.set_plugin(thread_id, last["plugin_zip"])
                 yield json.dumps({"final": event}) + "\n"
             except Exception as e:  # surface failures to the page instead of cutting the stream
-                yield json.dumps({"error": f"{type(e).__name__}: {e}"}) + "\n"
+                message, retryable = resilience.friendly_error(e)
+                yield json.dumps({"error": message, "retryable": retryable}) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
 

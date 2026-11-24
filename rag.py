@@ -12,7 +12,7 @@ import os
 import re
 from pathlib import Path
 
-import httpx
+import resilience
 import numpy as np
 
 RAG_DIR = Path(os.getenv("RAG_DIR", Path(__file__).parent / "rag_data"))
@@ -49,13 +49,12 @@ def chunk_header(rel: str, text: str) -> list[str]:
 
 
 def _embed(texts: list[str]) -> np.ndarray:
-    response = httpx.post(
+    response = resilience.post(
         "https://api.openai.com/v1/embeddings",
         headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
         json={"model": EMBED_MODEL, "input": texts, "dimensions": EMBED_DIMS},
         timeout=120,
     )
-    response.raise_for_status()
     vectors = np.array([d["embedding"] for d in response.json()["data"]], dtype=np.float32)
     return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
 

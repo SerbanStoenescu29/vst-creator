@@ -43,6 +43,8 @@ from langsmith import traceable
 
 from github_build import download_plugin, trigger_build, wait_for_build as poll_build
 import agent
+import guardrails
+import resilience
 import spec as spec_mod
 import rag
 from sample_code import fetch_sample_code
@@ -137,6 +139,8 @@ class VSTInfo(TypedDict, total=False):
     rag_sources: list  # [{"file", "score"}] found by retrieve_docs
     agent_notes: dict  # {"ungrounded": [...], "assumptions": [...]} from the code agent
     report: dict  # sources, assumptions and review flags shown to the user
+    ui_notice: str  # why the last UI picture was not accepted
+    ui_rejects: int  # pictures rejected so far
     rag_context: str  # JUCE documentation found by retrieve_docs
     sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
     generated_code: dict  # {plugin_editor_h, plugin_editor_cpp, plugin_processor_h, plugin_processor_cpp}
@@ -161,13 +165,12 @@ class VSTInfo(TypedDict, total=False):
 def _openai_llm(messages, temperature):
     url = os.getenv("OPENAI_CHAT_URL", "https://api.openai.com/v1/chat/completions")
     api_key = os.environ["OPENAI_API_KEY"]
-    response = httpx.post(
+    response = resilience.post(
         url,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={"model": OPENAI_MODEL, "messages": messages, "temperature": temperature},
         timeout=180,
     )
-    response.raise_for_status()
     data = response.json()
     usage = data.get("usage") or {}
     return {
@@ -236,7 +239,7 @@ def assistant(state: VSTInfo) -> dict:
         messages[-1] = {"role": "assistant", "content": json.dumps({"action": "reply", "answer": answer})}
         data = {"answer": answer}
         spec_text = spec_mod.format_spec(spec_data)
-    answer = str(data.get("answer", ""))
+    answer = guardrails.scrub_reply(str(data.get("answer", "")))
     if spec_text:
         answer = f"{answer}\n\n{spec_text}"
     return {"messages": messages, "action": "reply", "answer": answer}
@@ -441,7 +444,11 @@ ANALYZE_UI_PROMPT = """\
 You are a UI analyst for audio plugins. Describe the plugin user interface in the picture in as much detail as possible
 so that a developer can recreate it: the window size and proportions, the layout and every panel or section,
 each control (knobs, sliders, buttons, switches, meters, displays, drop-downs) with its label, position, relative size
-and likely function, the colour palette, fonts, textures and overall visual style. Answer in plain text."""
+and likely function, the colour palette, fonts, textures and overall visual style. Answer in plain text.
+
+If the picture is NOT a user interface of an audio plugin or music software (for example a photo of a person or place,
+a screenshot of something else, a document, or any inappropriate or explicit image), do not describe it. Answer with
+exactly one line: REJECT: <short reason>"""
 
 
 def ask_ui(state: VSTInfo) -> dict:
@@ -464,11 +471,11 @@ def ask_image(state: VSTInfo) -> dict:
     """Require a picture: keep asking until one is attached."""
     if state.get("ui_image"):
         return {}
-    prompt = UI_PICTURE_PROMPT
+    prompt = state.get("ui_notice") or UI_PICTURE_PROMPT
     while True:
         _, image = _unwrap(interrupt(prompt))
         if image:
-            return {"ui_image": image}
+            return {"ui_image": image, "ui_notice": ""}
         prompt = UI_PICTURE_AGAIN
 
 
@@ -485,8 +492,20 @@ def analyze_ui(state: VSTInfo) -> dict:
         ],
         temperature=0.2,
     ).strip()
+    if analysis.upper().startswith("REJECT"):
+        rejects = state.get("ui_rejects", 0) + 1
+        reason = analysis.split(":", 1)[-1].strip() or "it does not show a plugin interface"
+        if rejects < 2:
+            notice = f"That picture can't be used: {reason}. Please attach a screenshot or mockup of a plugin interface."
+            return {"ui_image": "", "ui_notice": notice, "ui_rejects": rejects}
+        # Second bad picture: carry on without a UI reference rather than loop forever.
+        return {"ui_image": "", "ui_notice": "", "ui_rejects": rejects}
     description = f"{state.get('description', '')}\n\nUI design (described from the user's picture):\n{analysis}"
     return {"description": description.strip(), "ui_image": ""}
+
+
+def route_after_analyze(state: VSTInfo) -> str:
+    return "retry" if state.get("ui_notice") else "next"
 
 
 def route_after_assistant(state: VSTInfo) -> str:
@@ -524,7 +543,11 @@ def build_graph(checkpointer=None):
         {"yes": "ask_image", "no": "fetch_sample"},
     )
     builder.add_edge("ask_image", "analyze_ui")
-    builder.add_edge("analyze_ui", "fetch_sample")
+    builder.add_conditional_edges(
+        "analyze_ui",
+        route_after_analyze,
+        {"retry": "ask_image", "next": "fetch_sample"},
+    )
     builder.add_edge("fetch_sample", "retrieve_docs")
     builder.add_edge("retrieve_docs", "write_code")
     builder.add_edge("write_code", "save_files")
