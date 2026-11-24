@@ -43,6 +43,7 @@ from langsmith import traceable
 
 from github_build import download_plugin, trigger_build, wait_for_build as poll_build
 import agent
+import spec as spec_mod
 import rag
 from sample_code import fetch_sample_code
 
@@ -67,14 +68,29 @@ You may ask if the user has UI design preferences, but do not ask for pictures y
 When the user does not confirm, your output should be:
 {
 "action": "reply",
-"answer": <your answer to the user>
+"answer": <your answer to the user>,
+"spec": <the specification below, as far as you can draft it, or omit it if there is nothing to draft yet>
 }
 
 When the user confirms that everything is correct and complete, the answer in this case should be:
 {
 "action" : "continue",
-"full_description": full detailed description of what the user wants
+"full_description": full detailed description of what the user wants,
+"spec": <the specification below, complete>
 }
+
+The specification is a JSON object:
+{
+"name": short plugin name,
+"type": "effect" or "instrument" or "midi_effect",
+"summary": one sentence,
+"parameters": [{"name": ..., "min": number, "max": number, "default": number, "unit": "Hz" or "dB" or "%" or "" ...}],
+"ui_elements": [e.g. "rotary knob for each parameter", "level meter"],
+"presets": [names, may be empty],
+"missing": [things the user did not specify and you could not reasonably choose],
+"assumptions": [values or choices you decided yourself because the user did not say]
+}
+Every plugin needs at least one parameter. Never invent facts silently: list them under "assumptions".
 """
 
 
@@ -116,6 +132,7 @@ class VSTInfo(TypedDict, total=False):
     description: str
     messages: list  # chat history sent to the model
     action: str  # "reply" or "continue", from the model's JSON
+    spec: dict  # the structured plugin specification (spec.py)
     agent_trace: list  # tool calls the code agent made: [{"tool", "input", "result"}]
     rag_context: str  # JUCE documentation found by retrieve_docs
     sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
@@ -204,13 +221,22 @@ def assistant(state: VSTInfo) -> dict:
     raw = call_openai([{"role": "system", "content": SYSTEM_PROMPT}, *messages])
     data = parse_reply(raw)
     messages = [*messages, {"role": "assistant", "content": raw.strip()}]
+    spec_data = data.get("spec")
+    spec_text = spec_mod.format_spec(spec_data)
     if data["action"] == "continue":
-        return {
-            "messages": messages,
-            "action": "continue",
-            "description": data.get("full_description", ""),
-        }
-    return {"messages": messages, "action": "reply", "answer": str(data.get("answer", ""))}
+        problems = spec_mod.validate(spec_data)
+        if not problems:
+            description = f"{data.get('full_description', '')}\n\n{spec_text}".strip()
+            return {"messages": messages, "action": "continue", "description": description, "spec": spec_data}
+        # The model confirmed too early: ask for what the specification still lacks instead of building.
+        answer = "Before I start building, I still need: " + "; ".join(problems) + "."
+        messages[-1] = {"role": "assistant", "content": json.dumps({"action": "reply", "answer": answer})}
+        data = {"answer": answer}
+        spec_text = spec_mod.format_spec(spec_data)
+    answer = str(data.get("answer", ""))
+    if spec_text:
+        answer = f"{answer}\n\n{spec_text}"
+    return {"messages": messages, "action": "reply", "answer": answer}
 
 
 def fetch_sample(state: VSTInfo) -> dict:
