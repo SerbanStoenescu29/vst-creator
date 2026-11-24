@@ -49,8 +49,25 @@ TOOLS = [
     },
     {
         "name": "submit_plugin",
-        "description": "Submit the finished plugin. Call it once, with the complete content of all four files.",
-        "input_schema": {"type": "object", "properties": _FILES_SCHEMA, "required": FILE_KEYS},
+        "description": "Submit the finished plugin. Call it once, with the complete content of all four files. "
+        "Be honest in ungrounded and assumptions: they are shown to the user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                **_FILES_SCHEMA,
+                "ungrounded": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "JUCE classes, methods or facts you used but found no documentation for (empty if all were documented)",
+                },
+                "assumptions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Choices you made that the plugin description did not specify",
+                },
+            },
+            "required": FILE_KEYS,
+        },
     },
 ]
 
@@ -104,8 +121,11 @@ def _call(system: str, messages: list) -> dict:
     return data
 
 
-def run(system: str, sample_code: dict, on_status=lambda text: None) -> tuple[dict, list]:
-    """Run the agent. Returns (the four files, a trace of the tool calls: [{"tool", "input", "result"}])."""
+def run(system: str, sample_code: dict, on_status=lambda text: None) -> tuple[dict, list, dict]:
+    """Run the agent. Returns (the four files, a trace of the tool calls, {"ungrounded": [...], "assumptions": [...]}).
+
+    A trace entry is {"tool", "input", "result"}, plus "sources" ([{"file", "score"}]) for documentation searches.
+    """
     messages = [{"role": "user", "content": "Write the plugin now. Use the tools, then call submit_plugin."}]
     trace = []
     for _ in range(MAX_STEPS):
@@ -120,10 +140,12 @@ def run(system: str, sample_code: dict, on_status=lambda text: None) -> tuple[di
         for call in calls:
             name, args = call["name"], call.get("input") or {}
             is_error = False
+            sources = None
             if name == "search_juce_docs":
                 on_status(f"Agent: searching the JUCE docs for \"{args.get('query', '')[:60]}\"")
                 try:
-                    out = rag.retrieve([str(args.get("query", ""))], per_query=5, max_chars=7000) or "No documentation found."
+                    out, sources = rag.search([str(args.get("query", ""))], per_query=5, max_chars=7000)
+                    out = out or "No documentation found."
                 except Exception as exc:
                     out, is_error = f"Search failed: {exc}", True
                 summary = f"{out.count('[juce_')} excerpts"
@@ -135,13 +157,17 @@ def run(system: str, sample_code: dict, on_status=lambda text: None) -> tuple[di
                 problems = validate(args)
                 if name == "submit_plugin" and not problems:
                     trace.append({"tool": name, "input": "four files", "result": "accepted"})
-                    return {k: args[k] for k in FILE_KEYS}, trace
+                    notes = {k: [str(i) for i in args.get(k) or [] if str(i).strip()] for k in ("ungrounded", "assumptions")}
+                    return {k: args[k] for k in FILE_KEYS}, trace, notes
                 out = "OK, no problems found." if not problems else "Problems:\n- " + "\n- ".join(problems)
                 is_error = bool(problems) and name == "submit_plugin"
                 summary = "ok" if not problems else f"{len(problems)} problems"
             else:
                 out, is_error, summary = f"Unknown tool {name}", True, "unknown tool"
-            trace.append({"tool": name, "input": str(args.get("query") or args.get("name") or "")[:120], "result": summary})
+            entry = {"tool": name, "input": str(args.get("query") or args.get("name") or "")[:120], "result": summary}
+            if sources:
+                entry["sources"] = sources
+            trace.append(entry)
             results.append({"type": "tool_result", "tool_use_id": call["id"], "content": out, "is_error": is_error})
         messages.append({"role": "user", "content": results})
     raise RuntimeError(f"The code agent did not submit a plugin within {MAX_STEPS} steps")

@@ -136,6 +136,7 @@ def _final_event(thread_id: str, values: dict) -> dict:
         "done": True,
         "description": values.get("description", ""),
         "download_url": f"/api/download/{thread_id}" if values.get("plugin_zip") else "",
+        "report": values.get("report"),
     }
 
 
@@ -188,7 +189,7 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
                 if thread_id in _pending:
                     _pending[thread_id] = (user["id"], event["reply"])
                 else:
-                    chats.add_message(thread_id, "assistant", event["reply"], bool(event.get("download_url")))
+                    chats.add_message(thread_id, "assistant", event["reply"], bool(event.get("download_url")), event.get("report"))
                     if event.get("download_url"):
                         chats.set_plugin(thread_id, last["plugin_zip"])
                 yield json.dumps({"final": event}) + "\n"

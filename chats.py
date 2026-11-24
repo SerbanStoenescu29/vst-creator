@@ -1,6 +1,7 @@
 """Saved conversations, stored in PostgreSQL."""
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from auth import _connect
 
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages (conversation_id, id);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS report JSONB;
 """
 
 
@@ -44,11 +46,11 @@ def owner(conv_id: str) -> int | None:
     return row[0] if row else None
 
 
-def add_message(conv_id: str, role: str, content: str, download: bool = False) -> None:
+def add_message(conv_id: str, role: str, content: str, download: bool = False, report: dict | None = None) -> None:
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, download) VALUES (%s, %s, %s, %s)",
-            (conv_id, role, content, download),
+            "INSERT INTO messages (conversation_id, role, content, download, report) VALUES (%s, %s, %s, %s, %s)",
+            (conv_id, role, content, download, Jsonb(report) if report else None),
         )
         conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conv_id,))
 
@@ -94,10 +96,10 @@ def get_conversation(conv_id: str, user_id: int) -> dict | None:
         if not conv:
             return None
         rows = conn.execute(
-            "SELECT role, content, download FROM messages WHERE conversation_id = %s ORDER BY id", (conv_id,)
+            "SELECT role, content, download, report FROM messages WHERE conversation_id = %s ORDER BY id", (conv_id,)
         ).fetchall()
     return {
         "id": conv[0],
         "title": conv[1],
-        "messages": [{"role": r[0], "content": r[1], "download": r[2]} for r in rows],
+        "messages": [{"role": r[0], "content": r[1], "download": r[2], "report": r[3]} for r in rows],
     }

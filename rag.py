@@ -86,11 +86,14 @@ def _load():
     return _index
 
 
-def retrieve(queries: list[str], per_query: int = 4, max_chars: int = 14000) -> str:
-    """The best chunks for each query, de-duplicated, as one text block. Empty if there is no index."""
+def search(queries: list[str], per_query: int = 4, max_chars: int = 14000) -> tuple[str, list[dict]]:
+    """The best chunks for each query, de-duplicated: (one text block, [{"file", "score"}]).
+
+    Empty results if there is no index. The score is the cosine similarity of the best query (0 to 1).
+    """
     index = _load()
     if index is None or not queries:
-        return ""
+        return "", []
     chunks, vectors = index
     scores = vectors @ _embed(queries).T  # (chunks, queries)
     picked, seen = [], set()
@@ -99,11 +102,18 @@ def retrieve(queries: list[str], per_query: int = 4, max_chars: int = 14000) -> 
             i = int(np.argsort(-scores[:, q])[rank])
             if i not in seen:
                 seen.add(i)
-                picked.append(chunks[i])
-    out, size = [], 0
-    for c in picked:
-        if size + len(c) > max_chars:
+                picked.append(i)
+    out, sources, size = [], {}, 0
+    for i in picked:
+        if size + len(chunks[i]) > max_chars:
             break
-        out.append(c)
-        size += len(c)
-    return "\n\n---\n\n".join(out)
+        out.append(chunks[i])
+        size += len(chunks[i])
+        file = chunks[i].split("]", 1)[0].lstrip("[")
+        sources[file] = max(sources.get(file, 0.0), round(float(scores[i].max()), 3))
+    found = [{"file": f, "score": sc} for f, sc in sorted(sources.items(), key=lambda kv: -kv[1])]
+    return "\n\n---\n\n".join(out), found
+
+
+def retrieve(queries: list[str], per_query: int = 4, max_chars: int = 14000) -> str:
+    return search(queries, per_query, max_chars)[0]

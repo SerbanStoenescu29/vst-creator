@@ -134,6 +134,9 @@ class VSTInfo(TypedDict, total=False):
     action: str  # "reply" or "continue", from the model's JSON
     spec: dict  # the structured plugin specification (spec.py)
     agent_trace: list  # tool calls the code agent made: [{"tool", "input", "result"}]
+    rag_sources: list  # [{"file", "score"}] found by retrieve_docs
+    agent_notes: dict  # {"ungrounded": [...], "assumptions": [...]} from the code agent
+    report: dict  # sources, assumptions and review flags shown to the user
     rag_context: str  # JUCE documentation found by retrieve_docs
     sample_code: dict  # {cmake_lists, plugin_editor_cpp, ...} fetched once confirmed
     generated_code: dict  # {plugin_editor_h, plugin_editor_cpp, plugin_processor_h, plugin_processor_cpp}
@@ -270,12 +273,12 @@ def retrieve_docs(state: VSTInfo) -> dict:
         queries = []
     queries = queries or [state["description"][:1000]]
     try:
-        context = rag.retrieve(queries)
+        context, sources = rag.search(queries)
     except Exception:  # missing index or embedding failure: write the code without the docs
-        context = ""
+        context, sources = "", []
     if context:
         context = f"Relevant JUCE 8.0.8 API documentation (use it to get the signatures right):\n\n{context}\n\n"
-    return {"rag_context": context}
+    return {"rag_context": context, "rag_sources": sources}
 
 
 def write_code(state: VSTInfo) -> dict:
@@ -298,8 +301,8 @@ def write_code(state: VSTInfo) -> dict:
     values = {**state["sample_code"], "description": state["description"], "rag_context": state.get("rag_context", ""), "previous_attempt": previous_attempt}
     # One pass, so braces inside the substituted text are never treated as placeholders.
     prompt = re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), WRITE_CODE_PROMPT)
-    files, trace = agent.run(prompt, state["sample_code"], on_status=lambda text: get_stream_writer()({"status": text}))
-    return {"generated_code": files, "agent_trace": [*(state.get("agent_trace") or []), *trace]}
+    files, trace, notes = agent.run(prompt, state["sample_code"], on_status=lambda text: get_stream_writer()({"status": text}))
+    return {"generated_code": files, "agent_trace": [*(state.get("agent_trace") or []), *trace], "agent_notes": notes}
 
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
@@ -337,6 +340,46 @@ def build_plugin(state: VSTInfo) -> dict:
     }
 
 
+WEAK_MATCH_SCORE = 0.45  # a doc match below this cosine similarity is not a real match (nonsense queries score ~0.37)
+
+
+def make_report(state: VSTInfo) -> dict:
+    """What the user should know about the result: sources used, what is uncertain, and whether to review it."""
+    sources = {}
+    for src in [*(state.get("rag_sources") or []), *(s for t in state.get("agent_trace") or [] for s in t.get("sources", []))]:
+        sources[src["file"]] = max(sources.get(src["file"], 0.0), src["score"])
+    sources_list = [{"file": f, "score": sc} for f, sc in sorted(sources.items(), key=lambda kv: -kv[1])]
+    spec = state.get("spec") or {}
+    notes = state.get("agent_notes") or {}
+    assumptions = [*(spec.get("assumptions") or []), *notes.get("assumptions", [])]
+    missing = list(spec.get("missing") or [])
+    ungrounded = list(notes.get("ungrounded", []))
+    rejected = sum(1 for t in state.get("agent_trace") or [] if t["tool"] == "submit_plugin" and t["result"] != "accepted")
+    reasons = []
+    if state.get("build_status") != "success":
+        reasons.append("The plugin did not build successfully.")
+    if state.get("build_attempts", 1) > 1:
+        reasons.append(f"The build needed {state['build_attempts']} attempts.")
+    if not sources_list:
+        reasons.append("No JUCE documentation was found for this plugin.")
+    elif sources_list[0]["score"] < WEAK_MATCH_SCORE:
+        reasons.append("The JUCE documentation found is only a weak match.")
+    if ungrounded:
+        reasons.append("Some JUCE APIs were used without documentation to confirm them.")
+    if missing:
+        reasons.append("Some requirements were never specified.")
+    if rejected:
+        reasons.append(f"The generated code failed the automatic checks {rejected} time(s) before it was accepted.")
+    return {
+        "sources": sources_list[:12],
+        "assumptions": assumptions,
+        "missing": missing,
+        "ungrounded": ungrounded,
+        "review": bool(reasons),
+        "review_reasons": reasons,
+    }
+
+
 BUILD_TIMEOUT_MINUTES = 20
 MAX_BUILD_ATTEMPTS = int(os.getenv("MAX_BUILD_ATTEMPTS", "3"))
 
@@ -352,6 +395,7 @@ def wait_for_build(state: VSTInfo) -> dict:
         on_wait=lambda secs: writer({"status": f"Waiting for build ({attempt}, {secs // 60} min)"}),
     )
     update = {"build_status": result["status"], "build_url": result["url"] or state["build_url"]}
+    update["report"] = make_report({**state, **update})
     if result["status"] == "success":
         update["build_error"] = ""
         writer({"status": "Downloading plugin"})
@@ -381,7 +425,7 @@ def give_up(state: VSTInfo) -> dict:
         why = f"The build did not finish within {BUILD_TIMEOUT_MINUTES} minutes."
     else:
         why = f"The build still failed after {state['build_attempts']} attempts.\n\n{state['build_error']}"
-    return {"build_message": f"{why}\n\nDetails: {state['build_url']}"}
+    return {"build_message": f"{why}\n\nDetails: {state['build_url']}", "report": make_report(state)}
 
 
 UI_QUESTION = "Do you have a picture of the UI design you want for the plugin? (yes or no)"

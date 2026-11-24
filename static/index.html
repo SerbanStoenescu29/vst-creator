@@ -84,6 +84,15 @@
   .download { display:inline-block; margin-top:10px; padding:9px 18px; border-radius:12px; color:#fff; font-weight:600; text-decoration:none;
     background: linear-gradient(135deg,var(--accent2),var(--accent)); box-shadow: 0 6px 20px rgba(34,211,238,.3); }
   .download:hover { filter: brightness(1.1); }
+  .report { margin-top: 12px; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; font-size: 14px; background: rgba(255,255,255,.03); }
+  .report summary { cursor: pointer; font-weight: 600; }
+  .report .badge { display: inline-block; margin-left: 8px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .report .badge.review { background: #ffd166; color: #2b2100; }
+  .report .badge.ok { background: rgba(34,211,238,.2); color: var(--accent2); }
+  .report h4 { margin: 10px 0 4px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .report ul { margin: 0; padding-left: 18px; }
+  .report code { font-size: 12px; color: var(--accent2); }
+  .report .score { color: var(--muted); font-size: 12px; }
   form { max-width: 760px; width: 100%; margin: 0 auto; padding: 0 16px 20px; }
   .box { display: flex; gap: 8px; align-items: flex-end; background: var(--card); border: 1px solid var(--line); border-radius: 26px; padding: 8px 8px 8px 20px; }
   .box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,.25); }
@@ -260,6 +269,37 @@ function setNode(name) {
   if (attach.hidden === wanted) { attach.hidden = !wanted; if (!wanted) clearAttachment(); }
 }
 
+function addReport(m, report) {
+  if (!report) return;
+  const box = document.createElement("details");
+  box.className = "report";
+  if (report.review) box.open = true;
+  const sum = document.createElement("summary");
+  sum.textContent = "Sources and notes";
+  const badge = document.createElement("span");
+  badge.className = "badge " + (report.review ? "review" : "ok");
+  badge.textContent = report.review ? "needs human review" : "no issues flagged";
+  sum.appendChild(badge);
+  box.appendChild(sum);
+  const section = (title, items, render) => {
+    if (!items || !items.length) return;
+    const h = document.createElement("h4"); h.textContent = title; box.appendChild(h);
+    const ul = document.createElement("ul");
+    for (const it of items) { const li = document.createElement("li"); render(li, it); ul.appendChild(li); }
+    box.appendChild(ul);
+  };
+  const text = (li, it) => { li.textContent = it; };
+  section("Why review is recommended", report.review_reasons, text);
+  section("Assumed by the model", report.assumptions, text);
+  section("Never specified", report.missing, text);
+  section("Used without documentation", report.ungrounded, text);
+  section("JUCE docs used", report.sources, (li, it) => {
+    const c = document.createElement("code"); c.textContent = it.file; li.appendChild(c);
+    const sc = document.createElement("span"); sc.className = "score"; sc.textContent = "  match " + Math.round(it.score * 100) + "%"; li.appendChild(sc);
+  });
+  m.appendChild(box);
+}
+
 function addDownload(m, id) {
   const a = document.createElement("a");
   a.href = "/api/download/" + id;
@@ -314,6 +354,7 @@ async function call(message, image) {
     t.classList.remove("typing");
     t.textContent = final.reply;
     if (final.download_url) addDownload(t, final.thread_id);
+    if (final.done) addReport(t, final.report);
   } catch (e) {
     t.classList.remove("typing");
     t.textContent = "Error: " + e.message;
@@ -395,6 +436,7 @@ async function openConversation(id) {
   for (const m of c.messages) {
     const el = add(m.role === "user" ? "user" : "bot", m.content);
     if (m.download) addDownload(el, c.id);
+    addReport(el, m.report);
   }
   threadId = c.id;
   done = !c.active;
