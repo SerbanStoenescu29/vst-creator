@@ -1,7 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "reflection_agent": "./main.py:graph"
+    "vst_creator": "./main.py:graph"
   },
   "env": "./.env"
 }
