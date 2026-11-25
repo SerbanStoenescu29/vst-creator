@@ -56,6 +56,10 @@ Failed calls are retried and shown as friendly errors with a "Try again" button.
 
 ## Architecture
 
+![Architecture diagram](docs/architecture.png)
+
+(Editable source: `docs/architecture.svg`. The text version below shows the same layout.)
+
 ```
 Browser (one HTML page)
    |  HTTP :80, streamed NDJSON
