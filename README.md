@@ -1,5 +1,27 @@
 # VST3 Creator
 
+
+Who the app is for: musicians and studio engineers working with DAWs (digital audio workstations).
+
+Technology: langchain and langgraph, because it's a web application
+
+Prompt improvements?
+
+Known limitations: 
+ - sometimes (in rare cases) the app can build but crash. Possible solution: have a step in the workflow that starts the standalone plugin and checks for the exit code. If this step fails, go back to the coding step
+ - you cannot refine (currently, but it can be done in the future)
+ - sometimes the build fails with errors that have been encountered before. Possible solution: keep a "lessons learned" file
+ - the branches still exist after building 
+
+Prompt improvements:
+ - make sure to mention the JUCE library explicitly (some build failures were due to version mismatch)
+ - tell the prompt explicitly not to ask for UI designs at first 
+ 
+IAM role: 
+vst-creator-access
+
+
+
 Describe an audio plugin in a chat and get a built Windows **VST3 plugin** (plus a Standalone app) to download.
 
 - **User:** a musician or sound designer who wants a plugin but does not write C++.
