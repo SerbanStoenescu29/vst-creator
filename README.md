@@ -32,6 +32,30 @@ Failed calls are retried and shown as friendly errors with a "Try again" button.
 | Storage | PostgreSQL (accounts, conversations, reports), S3 bucket on AWS (uploads, built plugins, knowledge index) |
 | Build | GitHub Actions on `windows-2022`, CMake + Visual Studio 2022 |
 
+## Architecture
+
+```
+Browser (one HTML page)
+   |  HTTP :80, streamed NDJSON
+   v
+AWS EC2 (Ubuntu, Docker)  --- IAM role, no stored keys --->  S3: uploads, built plugins, knowledge index
+ +-- app container: FastAPI + LangGraph + guardrails         Secrets Manager: API keys (read at boot)
+ +-- db container: PostgreSQL (accounts, chats, reports)     CloudWatch Logs: app and db logs
+   |
+   +--> OpenAI API (chat, picture analysis, guardrails, embeddings)
+   +--> Anthropic API (code-writing agent)
+   +--> GitHub API / Actions (build on windows-2022, returns the zip)
+```
+
+- **One instance, two containers.** The browser talks only to the FastAPI app on port 80. It runs the LangGraph
+  flow, calls the AI services and keeps state in PostgreSQL. Chat turns in progress live in the app's memory.
+- **Grounding.** The agent searches a vector index of the JUCE headers (kept in the image, copy on S3) and the
+  answer ships with the sources used and a "needs review" flag.
+- **Build.** The generated project is pushed to a throwaway branch, GitHub Actions builds it with Visual Studio,
+  and the app downloads the artifact, stores the zip on S3 and offers it through a short-lived link.
+- **Security.** Only port 80 is public (SSH from one IP); the instance role can reach just its own bucket, log
+  group and secret; secrets are in Secrets Manager; every message passes the guardrails first.
+
 ## Run it locally
 
 Needs Python 3.11+, Docker (for Postgres) and the keys below.
