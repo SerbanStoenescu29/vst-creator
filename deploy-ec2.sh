@@ -2,8 +2,9 @@
 # Deploy vst-creator to the EC2 instance: pull the latest code from GitHub on the
 # server, rebuild the Docker image and restart the container.
 #
-#   ./deploy-ec2.sh              deploy (uploads .env only if the server has none)
-#   ./deploy-ec2.sh --env        deploy and overwrite the server's .env with the local one
+#   ./deploy-ec2.sh              deploy (the server loads its keys from AWS Secrets Manager if it has no .env yet)
+#   ./deploy-ec2.sh --secrets    deploy and refresh the server's .env from the secret (after changing a key)
+#   ./deploy-ec2.sh --env        old way: copy the local .env to the server instead (not needed with Secrets Manager)
 #
 # Settings (environment variables, all optional):
 #   EC2_HOST      public IP/DNS of the instance (default: looked up with the AWS CLI)
@@ -22,7 +23,9 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/vst-creator-ec2}"
 REPO_URL="${REPO_URL:-https://github.com/SerbanStoenescu29/vst-creator}"
 APP_DIR="vst-creator"
 FORCE_ENV=0
+FORCE_SECRETS=0
 [ "${1:-}" = "--env" ] && FORCE_ENV=1
+[ "${1:-}" = "--secrets" ] && FORCE_SECRETS=1
 
 # The public IP changes every time the instance is stopped and started, so look it up.
 if [ -z "${EC2_HOST:-}" ]; then
@@ -36,7 +39,7 @@ if [ -z "${EC2_HOST:-}" ]; then
   fi
 fi
 [ -f "$SSH_KEY" ] || { echo "SSH key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
-[ -f .env ] || { echo "No local .env to upload." >&2; exit 1; }
+[ "$FORCE_ENV" = 0 ] || [ -f .env ] || { echo "No local .env to upload." >&2; exit 1; }
 
 # The server pulls from GitHub, so unpushed commits would not be deployed.
 if [ -n "$(git log '@{u}..' --oneline 2>/dev/null)" ]; then
@@ -57,10 +60,13 @@ remote "set -e
   fi
   if [ -d $APP_DIR/.git ]; then git -C $APP_DIR pull -q --ff-only; else git clone -q $REPO_URL $APP_DIR; fi"
 
-if [ "$FORCE_ENV" = 1 ] || ! remote "test -f $APP_DIR/.env"; then
-  echo "==> Uploading .env"
+if [ "$FORCE_ENV" = 1 ]; then
+  echo "==> Uploading the local .env"
   scp "${SSH_OPTS[@]}" .env "$EC2_USER@$EC2_HOST:$APP_DIR/.env"
   remote "chmod 600 $APP_DIR/.env"
+elif [ "$FORCE_SECRETS" = 1 ] || ! remote "test -f $APP_DIR/.env"; then
+  echo "==> Loading the keys from AWS Secrets Manager"
+  remote "AWS_REGION=$AWS_REGION bash $APP_DIR/deploy/load-secrets.sh"
 fi
 
 # docker compose needs POSTGRES_PASSWORD (the accounts database). Create one on the server if missing.
