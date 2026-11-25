@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 import resilience
+import storage
 import numpy as np
 
 RAG_DIR = Path(os.getenv("RAG_DIR", Path(__file__).parent / "rag_data"))
@@ -79,6 +80,9 @@ def _load():
     global _index
     if _index is None:
         chunks_file, vectors_file = INDEX_DIR / "chunks.json", INDEX_DIR / "vectors.npy"
+        if not (chunks_file.exists() and vectors_file.exists()):  # not in the image: fetch the copy kept on S3
+            storage.download_file("knowledge/index/chunks.json", chunks_file)
+            storage.download_file("knowledge/index/vectors.npy", vectors_file)
         if not (chunks_file.exists() and vectors_file.exists()):
             return None
         _index = (json.loads(chunks_file.read_text(encoding="utf-8")), np.load(vectors_file).astype(np.float32))

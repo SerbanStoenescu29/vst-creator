@@ -29,7 +29,7 @@ Failed calls are retried and shown as friendly errors with a "Try again" button.
 | Code writing | Anthropic `claude-sonnet-5-5` as a tool-calling agent |
 | Knowledge base | JUCE 8.0.8 headers, chunked per doc comment, embedded, searched with cosine similarity (`rag.py`) |
 | Backend / frontend | FastAPI (streaming NDJSON) / one hand-written HTML page, no framework |
-| Storage | PostgreSQL (accounts, conversations, reports), S3 bucket on AWS |
+| Storage | PostgreSQL (accounts, conversations, reports), S3 bucket on AWS (uploads, built plugins, knowledge index) |
 | Build | GitHub Actions on `windows-2022`, CMake + Visual Studio 2022 |
 
 ## Run it locally
@@ -49,6 +49,21 @@ Optional: `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `GUARD_BLOCK_CONFIDENCE`, `MAX_BUIL
 
 The RAG index is committed in `rag_data/index/`. To rebuild it from the JUCE headers in `rag_data/juce_modules/`:
 `python build_rag_index.py` (costs a few cents of embeddings).
+
+## What is stored where
+
+| Data | Where | Notes |
+|---|---|---|
+| Accounts (scrypt-hashed passwords), conversations, messages, the "Sources and notes" report | PostgreSQL (Docker volume on the encrypted instance disk) | |
+| Built plugins (zip with VST3 and Standalone) | S3: `plugins/<conversation id>/vst3.zip` | The database keeps the S3 address; the download button redirects to a 5-minute link, issued only to the conversation's owner |
+| Uploaded UI pictures | S3: `uploads/<conversation id>/<random>.<ext>` | Saved after the input checks and guardrails pass; the message row records the location |
+| Knowledge data (RAG index of the JUCE docs) | In the Docker image, with a copy in S3: `knowledge/index/` | The app downloads the copy if the index is missing from the container |
+| API keys and tokens | AWS Secrets Manager (`vst-creator/app`) | Read at boot with the instance's IAM role, written to a `chmod 600` `.env` for Docker; never in git |
+| Container logs | CloudWatch Logs | Stack deployments only (see below) |
+
+S3 is used when the `S3_BUCKET` setting exists (the AWS deployment sets it). Without it, for example when running
+locally, the app keeps files on the local disk and everything else works the same. If an upload to S3 fails, the
+failure is logged and the user's request still completes.
 
 ## Deploy on AWS (CloudFormation)
 
@@ -103,7 +118,9 @@ If the stack fails, the reason is in the stack events; on the instance `/var/log
 
 Push your change to the branch the stack uses, then on the instance (SSH) run
 `cd /opt/vst-creator && git pull && sudo docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --build`.
-(`deploy-ec2.sh` is the author's own helper for an instance created by hand and is not needed for the stack.)
+(`deploy-ec2.sh` is the author's own helper for an instance created by hand and is not needed for the stack.
+It pulls the code, refreshes `.env` from the Secrets Manager secret with `--secrets`, rebuilds the containers and
+waits for the health check. The IAM role of that instance may read only the bucket, one log group and one secret.)
 
 ### Clean up
 
@@ -127,6 +144,8 @@ total; see the AWS pricing pages for your region). Deleting the stack stops all 
 | `guardrails.py`, `resilience.py` | Input guardrails and validation; retries and friendly errors |
 | `github_build.py`, `.github/workflows/build-vst.yml` | Pushes the project to GitHub and builds it |
 | `server.py`, `auth.py`, `chats.py`, `static/index.html` | Web API, accounts, saved conversations, the page |
+| `storage.py` | S3 storage for uploads, built plugins and the knowledge index (off when `S3_BUCKET` is not set) |
+| `deploy/load-secrets.sh` | Runs on the server: writes `.env` from the Secrets Manager secret |
 | `Dockerfile`, `docker-compose.yml`, `docker-compose.aws.yml` | Container setup (the second file adds CloudWatch logging) |
 | `deploy/cloudformation.yaml`, `deploy-ec2.sh` | AWS deployment |
 

@@ -9,3 +9,4 @@ uvicorn[standard]>=0.29
 # corporate networks that inspect TLS - use the OS certificate store
 truststore>=0.9
 numpy
+boto3>=1.34

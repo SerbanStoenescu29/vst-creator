@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages (conversation_id, id);
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS report JSONB;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment TEXT;
 """
 
 
@@ -46,11 +47,11 @@ def owner(conv_id: str) -> int | None:
     return row[0] if row else None
 
 
-def add_message(conv_id: str, role: str, content: str, download: bool = False, report: dict | None = None) -> None:
+def add_message(conv_id: str, role: str, content: str, download: bool = False, report: dict | None = None, attachment: str | None = None) -> None:
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, download, report) VALUES (%s, %s, %s, %s, %s)",
-            (conv_id, role, content, download, Jsonb(report) if report else None),
+            "INSERT INTO messages (conversation_id, role, content, download, report, attachment) VALUES (%s, %s, %s, %s, %s, %s)",
+            (conv_id, role, content, download, Jsonb(report) if report else None, attachment),
         )
         conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conv_id,))
 

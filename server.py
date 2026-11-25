@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
@@ -21,6 +21,7 @@ import chats
 import guardrails
 import main
 import resilience
+import storage
 
 main.check_env()
 
@@ -118,6 +119,7 @@ def me(user: dict = Depends(current_user)):
     return {"username": user["username"]}
 
 
+log = logging.getLogger("vst")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
@@ -201,7 +203,8 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
                 chats.add_message(thread_id, "assistant", pending[1])
             del _pending[thread_id]
         saved = body.message + ("\n" if body.message and body.image else "") + ("[picture attached]" if body.image else "")
-        chats.add_message(thread_id, "user", saved)
+        attachment = storage.store_picture(thread_id, body.image) if body.image else None  # kept on S3 when configured
+        chats.add_message(thread_id, "user", saved, attachment=attachment)
         chats.set_title_from(thread_id, body.message)
 
     def events():
@@ -224,7 +227,8 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
                 else:
                     chats.add_message(thread_id, "assistant", event["reply"], bool(event.get("download_url")), event.get("report"))
                     if event.get("download_url"):
-                        chats.set_plugin(thread_id, last["plugin_zip"])
+                        stored = storage.upload_file(last["plugin_zip"], f"plugins/{thread_id}/vst3.zip", "application/zip")
+                        chats.set_plugin(thread_id, stored or last["plugin_zip"])
                 yield json.dumps({"final": event}) + "\n"
             except Exception as e:  # surface failures to the page instead of cutting the stream
                 message, retryable = resilience.friendly_error(e)
@@ -237,6 +241,12 @@ def chat(body: ChatIn, user: dict = Depends(current_user)):
 def download(thread_id: str, user: dict = Depends(current_user)):
     """Serve the built plugin zip for a finished conversation."""
     plugin_zip = chats.plugin_path(thread_id, user["id"])
+    if storage.is_s3_uri(plugin_zip):  # on S3: send the browser to a short-lived link
+        try:
+            return RedirectResponse(storage.download_url(plugin_zip, "vst3-plugin.zip"), status_code=302)
+        except Exception as exc:
+            log.error("could not create the download link: %r", exc)
+            raise HTTPException(503, "The download is temporarily unavailable. Please try again.")
     if not plugin_zip or not Path(plugin_zip).is_file():
         raise HTTPException(404, "No plugin available for this conversation")
     return FileResponse(plugin_zip, media_type="application/zip", filename="vst3-plugin.zip")
