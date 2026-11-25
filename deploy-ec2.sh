@@ -73,7 +73,8 @@ fi
 remote "grep -q '^POSTGRES_PASSWORD=.' $APP_DIR/.env || echo \"POSTGRES_PASSWORD=\$(openssl rand -hex 24)\" >> $APP_DIR/.env"
 
 echo "==> Building and starting the containers"
-remote "cd $APP_DIR && sudo docker compose up -d --build 2>&1 | tail -5"
+# With LOG_GROUP in .env the containers send their logs to CloudWatch Logs (docker-compose.aws.yml).
+remote "cd $APP_DIR && F='-f docker-compose.yml'; grep -q '^LOG_GROUP=.' .env && F='-f docker-compose.yml -f docker-compose.aws.yml'; sudo docker compose \$F up -d --build 2>&1 | tail -5"
 
 echo "==> Waiting for the app"
 for _ in $(seq 1 20); do
@@ -83,5 +84,5 @@ for _ in $(seq 1 20); do
   fi
   sleep 3
 done
-echo "The app did not become healthy. Logs: ssh -i $SSH_KEY $EC2_USER@$EC2_HOST 'cd $APP_DIR && sudo docker compose logs --tail 50'" >&2
+echo "The app did not become healthy. See the log group named in LOG_GROUP in CloudWatch Logs (or on the server: sudo docker ps; /var/log/syslog)." >&2
 exit 1

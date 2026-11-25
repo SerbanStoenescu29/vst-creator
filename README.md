@@ -59,7 +59,7 @@ The RAG index is committed in `rag_data/index/`. To rebuild it from the JUCE hea
 | Uploaded UI pictures | S3: `uploads/<conversation id>/<random>.<ext>` | Saved after the input checks and guardrails pass; the message row records the location |
 | Knowledge data (RAG index of the JUCE docs) | In the Docker image, with a copy in S3: `knowledge/index/` | The app downloads the copy if the index is missing from the container |
 | API keys and tokens | AWS Secrets Manager (`vst-creator/app`) | Read at boot with the instance's IAM role, written to a `chmod 600` `.env` for Docker; never in git |
-| Container logs | CloudWatch Logs | Stack deployments only (see below) |
+| Container logs (app and database) | CloudWatch Logs: log group `/vst-creator/app` (the stack uses `/vst-creator/<stack name>`), streams `app` and `db`, kept 30 days | Set by `LOG_GROUP` in the secret and `docker-compose.aws.yml`. Docker's own `docker logs` no longer shows them: read them in CloudWatch |
 
 S3 is used when the `S3_BUCKET` setting exists (the AWS deployment sets it). Without it, for example when running
 locally, the app keeps files on the local disk and everything else works the same. If an upload to S3 fails, the
