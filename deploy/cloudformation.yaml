@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  VST3 Creator - one EC2 instance running the app and its Postgres database in Docker, a private S3 bucket,
+  a CloudWatch log group, and an IAM role that is allowed to use only those. The stack finishes
+  (CREATE_COMPLETE) when the app answers its health check.
+
+Parameters:
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+    MinLength: 10
+    Description: OpenAI API key (chat, picture analysis, guardrails, embeddings).
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    MinLength: 10
+    Description: Anthropic API key (the code-writing agent).
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    MinLength: 10
+    Description: GitHub token with read/write access to Contents and Actions on the repository in GitHubRepo.
+  GitHubRepo:
+    Type: String
+    Default: SerbanStoenescu29/vst-creator
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    Description: owner/name of YOUR fork of the project. The plugin builds run in its GitHub Actions.
+  RepoUrl:
+    Type: String
+    Default: https://github.com/SerbanStoenescu29/vst-creator.git
+    Description: Git URL the instance clones the application from (use your fork to deploy your own changes).
+  RepoBranch:
+    Type: String
+    Default: master
+  OpenAIModel:
+    Type: String
+    Default: gpt-4.1
+  AnthropicModel:
+    Type: String
+    Default: claude-sonnet-5-5
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium, t3.large]
+    Description: t3.small (2 GB) is enough; the app and its database share the instance.
+  SshCidr:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    Description: >
+      Address range allowed to SSH in, for example 203.0.113.7/32 (your own IP). Leave empty for no SSH at all;
+      the web app on port 80 works either way.
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: Existing EC2 key pair for SSH. Leave empty if SshCidr is empty.
+  LatestUbuntuAmi:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
+Conditions:
+  AllowSsh: !Not [!Equals [!Ref SshCidr, ""]]
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+
+Resources:
+  # ---- storage: uploaded pictures and built plugins -------------------------------------------------
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---- logs ------------------------------------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/vst-creator/${AWS::StackName}"
+      RetentionInDays: 30
+
+  # ---- secrets: the .env file of the app, readable only by the instance role ---------------------------
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Environment file (API keys) of the VST3 Creator app
+      SecretString: !Sub |
+        OPENAI_API_KEY=${OpenAIApiKey}
+        ANTHROPIC_API_KEY=${AnthropicApiKey}
+        GITHUB_TOKEN=${GitHubToken}
+        GITHUB_REPO=${GitHubRepo}
+        OPENAI_MODEL=${OpenAIModel}
+        ANTHROPIC_MODEL=${AnthropicModel}
+        AWS_REGION=${AWS::Region}
+        S3_BUCKET=${DataBucket}
+        LOG_GROUP=/vst-creator/${AWS::StackName}
+
+  # ---- access: what the instance may do ----------------------------------------------------------------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: vst-creator-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BucketObjects
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub "${DataBucket.Arn}/*"
+              - Sid: BucketList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !GetAtt LogGroup.Arn
+              - Sid: ReadOwnSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AppSecret
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ---- network: web for everyone, SSH only from the range you give --------------------------------------
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VST3 Creator - HTTP from anywhere, SSH only from SshCidr
+      SecurityGroupIngress:
+        - Description: Web app
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - !If
+          - AllowSsh
+          - Description: SSH from the allowed range
+            IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref SshCidr
+          - !Ref AWS::NoValue
+
+  # ---- the server -----------------------------------------------------------------------------------------
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestUbuntuAmi
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      MetadataOptions:
+        HttpTokens: required          # IMDSv2 only
+        HttpPutResponseHopLimit: 2    # lets the app containers use the instance role too
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+      Tags:
+        - { Key: Name, Value: !Sub "vst-creator-${AWS::StackName}" }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee -a /var/log/vst-setup.log) 2>&1
+          set -eu
+          signal() { curl -s -X PUT -H 'Content-Type:' --data-binary "{\"Status\":\"$1\",\"Reason\":\"$2\",\"UniqueId\":\"vst\",\"Data\":\"$2\"}" '${SetupHandle}'; }
+          trap 'signal FAILURE "setup failed - see /var/log/vst-setup.log on the instance"' ERR
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y git curl unzip openssl
+          curl -fsSL https://get.docker.com | sh
+          curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+          unzip -q /tmp/awscli.zip -d /tmp
+          /tmp/aws/install
+
+          git clone --depth 1 --branch ${RepoBranch} ${RepoUrl} /opt/vst-creator
+          cd /opt/vst-creator
+          aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${AppSecret} --query SecretString --output text > .env
+          echo >> .env
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
+          chmod 600 .env
+
+          docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --build
+          for i in $(seq 1 60); do curl -fs localhost/healthz > /dev/null && break; sleep 5; done
+          curl -fs localhost/healthz > /dev/null
+          signal SUCCESS "app is healthy"
+
+  SetupHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  SetupWait:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: Instance
+    Properties:
+      Handle: !Ref SetupHandle
+      Timeout: "1200"
+      Count: 1
+
+  # ---- a fixed public address (kept while the instance is stopped and started) ------------------------
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+Outputs:
+  AppUrl:
+    Description: Open this in a browser
+    Value: !Sub "http://${ElasticIp}/"
+  BucketName:
+    Value: !Ref DataBucket
+  LogGroupName:
+    Value: !Ref LogGroup
+  InstanceId:
+    Value: !Ref Instance

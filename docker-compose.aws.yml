@@ -1,0 +1,18 @@
+# Extra settings for running on AWS: send the container logs to CloudWatch Logs.
+# Use together with the main file:  docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --build
+# AWS_REGION and LOG_GROUP come from .env (the CloudFormation stack writes them there).
+services:
+  vst-creator:
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:?set AWS_REGION in .env}
+        awslogs-group: ${LOG_GROUP:?set LOG_GROUP in .env}
+        awslogs-stream: app
+  db:
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:?set AWS_REGION in .env}
+        awslogs-group: ${LOG_GROUP:?set LOG_GROUP in .env}
+        awslogs-stream: db
