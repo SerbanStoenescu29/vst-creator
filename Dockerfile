@@ -10,7 +10,8 @@ COPY main.py server.py auth.py chats.py sample_code.py github_build.py rag.py ag
 COPY rag_data/index ./rag_data/index
 COPY static ./static
 
-RUN useradd -m app
+RUN useradd -m app && mkdir -p /data/output && chown app /data/output
+ENV OUTPUT_DIR=/data/output
 USER app
 
 EXPOSE 8000

@@ -4,6 +4,8 @@ services:
     ports:
       - "80:8000"
     env_file: .env
+    volumes:
+      - outputdata:/data/output   # generated projects and built plugins (the app user cannot write inside /app)
     environment:
       # Overrides any DATABASE_URL in .env (that one is for running the app outside Docker).
       DATABASE_URL: postgresql://vst:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/vst
@@ -31,3 +33,4 @@ services:
 
 volumes:
   pgdata:
+  outputdata:
